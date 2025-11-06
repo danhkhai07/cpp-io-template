@@ -9,12 +9,15 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define PORT 14007
+
 void receiveMessage(int fd){
     char buffer[1024];
     for (;;){
         int bytes = recv(fd, buffer, sizeof(buffer), 0);
         if (bytes <= 0) return;
-        std::cout << "\r" << buffer << "\n" << std::flush;
+        buffer[bytes] = '\0';
+        std::cout << "\r" << buffer << "\n> " << std::flush;
     }
 }
 
@@ -24,7 +27,7 @@ int main(){
 
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(1234);
+    serverAddress.sin_port = htons(PORT);
     serverAddress.sin_addr.s_addr = inet_addr("36.50.55.225");
 
     if (connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress))){
@@ -32,12 +35,13 @@ int main(){
         return 1;
     }
 
+    std::cout << "> ";
     std::thread t(receiveMessage, clientSocket);
 
     std::string message;
     while (std::getline(std::cin, message)){
+        std::cout << "\033[A\033[K";
         send(clientSocket, message.c_str(), message.size() + 1, 0);
-        std::cout << "> " << std::flush;
     }
 
     close(clientSocket);

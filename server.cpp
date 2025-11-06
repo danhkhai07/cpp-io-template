@@ -11,7 +11,7 @@
 #include <utility>
 
 #define MAX_CLIENTS 3
-#define PORT 1234
+#define PORT 14007
 
 int main(){
     int newSocket;
