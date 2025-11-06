@@ -11,13 +11,17 @@
 
 #define PORT 14007
 
+std::string currentInput;
+
 void receiveMessage(int fd){
     char buffer[1024];
     for (;;){
         int bytes = recv(fd, buffer, sizeof(buffer), 0);
         if (bytes <= 0) return;
         buffer[bytes] = '\0';
-        std::cout << "\r" << buffer << "\n> " << std::flush;
+
+        std::cout << "\r" << buffer << "\n";
+        std::cout << "> " << currentInput << std::flush;
     }
 }
 
@@ -35,13 +39,20 @@ int main(){
     }
     std::cout << "Connection succeeded!\n";
 
-    std::cout << "> ";
     std::thread t(receiveMessage, clientSocket);
 
-    std::string message;
-    while (std::getline(std::cin, message)){
-        std::cout << "\033[A\033[K";
-        send(clientSocket, message.c_str(), message.size() + 1, 0);
+    std::cout << "> ";
+    while (true){
+        char c = std::cin.get();
+        if (c == '\n'){
+            if (!currentInput.empty()){
+                send(clientSocket, currentInput.c_str(), currentInput.size() + 1, 0);
+                currentInput = "";
+            }
+            std::cout << "\033[A\033[K";
+        } else {
+            currentInput += c;
+        }
     }
 
     close(clientSocket);

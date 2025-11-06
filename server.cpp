@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <iostream>
 
 #include <poll.h>
@@ -26,12 +27,12 @@ int main(){
     serverAddress.sin_addr.s_addr   = INADDR_ANY;
         
     if (bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0){
-        std::cerr << "Bind failed.";
+        perror("Bind failed");
         return 1;
     }
 
     if (listen(serverSocket, 5) < 0){
-        std::cerr << "Listen failed.";
+        perror("Listen failed");
         return 1;
     }
 
@@ -42,6 +43,7 @@ int main(){
     
     std::queue<std::pair<int, char*>> messageQ;
     std::queue<std::pair<int, char*>> pending;
+    bool reachCap = false;
     while (1){
         int ready = poll(fds, nfds, 0);
         if (ready < 0){
@@ -51,13 +53,17 @@ int main(){
 
         if (fds[0].revents & POLLIN){
             if (nfds < MAX_CLIENTS + 1){
+                reachCap = false;
                 newSocket = accept(serverSocket, (sockaddr*)&serverAddress, &addrlen); 
                 std::cout << "New client connected: " << newSocket << ".\n";
                 fds[nfds].fd = newSocket;
                 fds[nfds].events = POLLIN;
                 nfds++;
             } else {
-                std::cout << "A client tried to connect but got dropped due to maxed out number of clients.\n";
+                if (!reachCap){
+                    std::cout << "Reached max capacity.\n";
+                    reachCap = true;
+                }
             }
         }
 
