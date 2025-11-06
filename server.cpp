@@ -2,9 +2,13 @@
 
 #include <poll.h>
 #include <netinet/in.h>
+#include <string>
 #include <sys/poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <queue>
+#include <utility>
 
 #define MAX_CLIENTS 3
 #define PORT 1234
@@ -36,6 +40,8 @@ int main(){
 
     std::cout << "Server listening on port " << PORT << "...\n";
     
+    std::queue<std::pair<int, char*>> messageQ;
+    std::queue<std::pair<int, char*>> pending;
     while (1){
         int ready = poll(fds, nfds, 0);
         if (ready < 0){
@@ -55,6 +61,8 @@ int main(){
             }
         }
 
+        messageQ = pending;
+        pending = {};
         for (int i = 1; i < nfds; i++){
             if (fds[i].revents & POLLIN){
                 char buffer[1024];
@@ -68,9 +76,22 @@ int main(){
                     continue;
                 }
 
-                std::cout << "Client " << fds[i].fd << ": " << buffer << std::endl;
+                pending.push({fds[i].fd, buffer});
+
+            }
+
+            if (messageQ.size() > 0){
+                std::queue<std::pair<int, char*>>
+                    tmpQ = messageQ;
+                while (!tmpQ.empty()){
+                    std::pair<int, char*> top = tmpQ.front();
+                    std::string msg = "Client " + std::to_string(top.first) + ": " + top.second;
+                    send(fds[i].fd, msg.data(), msg.size(), 0);
+                    tmpQ.pop();
+                }
             }
         }
+        messageQ = {};
     }
 
     close(serverSocket);

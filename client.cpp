@@ -1,9 +1,22 @@
 #include <iostream>
 #include <cstring>
+#include <ostream>
+#include <thread>
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+void receiveMessage(int fd){
+    char buffer[1024];
+    for (;;){
+        int bytes = recv(fd, buffer, sizeof(buffer), 0);
+        if (bytes <= 0) return;
+        std::cout << "\r" << buffer << "\n" << std::flush;
+    }
+}
 
 int main(){
     std::cout << "Note: Send 'EOC' to end conversation.\n";
@@ -19,12 +32,14 @@ int main(){
         return 1;
     }
 
+    std::thread t(receiveMessage, clientSocket);
+
     std::string message;
-    for (;;){
-        std::cout << "Message to server: ";
-        std::getline(std::cin, message);
+    while (std::getline(std::cin, message)){
         send(clientSocket, message.c_str(), message.size() + 1, 0);
+        std::cout << "> " << std::flush;
     }
 
     close(clientSocket);
+    t.join();
 }
