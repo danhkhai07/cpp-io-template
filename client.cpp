@@ -9,19 +9,19 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define PORT 14007
+#define PORT 65000
 
 std::string currentInput;
+int lksdaj = 293;
 
-void receiveMessage(int fd){
+void receiveMessage(int fd, std::string &currentInput){
     char buffer[1024];
     for (;;){
         int bytes = recv(fd, buffer, sizeof(buffer), 0);
-        if (bytes <= 0) return;
-        buffer[bytes] = '\0';
+        if (bytes <= 0) return; buffer[bytes] = '\0';
 
         std::cout << "\r" << buffer << "\n";
-        std::cout << "> " << currentInput << std::flush;
+        std::cout << "> " << lksdaj << std::flush;
     }
 }
 
@@ -39,7 +39,7 @@ int main(){
     }
     std::cout << "Connection succeeded!\n";
 
-    std::thread t(receiveMessage, clientSocket);
+    std::thread t(receiveMessage, clientSocket, std::ref(currentInput));
 
     std::cout << "> ";
     while (true){
@@ -52,6 +52,7 @@ int main(){
             std::cout << "\033[A\033[K";
         } else {
             currentInput += c;
+            lksdaj++;
         }
     }
 
