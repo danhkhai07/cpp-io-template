@@ -1,24 +1,102 @@
-#include <cstdio>
-#include <iostream>
-
-#include <poll.h>
+#include <iterator>
 #include <netinet/in.h>
 #include <string>
-#include <sys/poll.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <fcntl.h>
 
+#include <cstdio>
+#include <iostream>
+#include <map>
 #include <queue>
 #include <utility>
 
-#define MAX_CLIENTS 3
+#define MAX_CLIENTS 5
 #define PORT 65000
+#define MSG_SIZE 1024
+#define PACKET_SIZE 16
+
+int setNonBlocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+struct TCPParser{
+private:
+    std::queue<int>             senderQueue;
+    std::queue<int>             receiverQueue;
+    std::queue<char[MSG_SIZE]>  messageQueue; // { receiver , message }
+
+        int msgLen = 0;
+        size_t capturedMsgLen = 0; 
+
+        int receiverFd = 0;
+        size_t capturedReceiverFd = 0; 
+
+        char pendingMsg[MSG_SIZE];
+        size_t pendLen = 0;
+
+    int feed(char* packet, size_t len){
+        for (size_t i = 0; i < len; ++i, ++packet){
+            char c = *packet;
+            if (capturedReceiverFd < 4){
+                if (c < '0' || c > '9') return -1;
+                receiverFd = c - '0' + receiverFd*10;
+                capturedReceiverFd++;
+                continue;
+            } 
+
+            if (capturedMsgLen < 4){
+                msgLen = c - '0' + msgLen*10;
+                capturedMsgLen++;
+                continue;
+            } 
+
+            pendingMsg[pendLen] = c;
+            pendLen++;
+            msgLen--;
+
+            if (msgLen == 0){
+                messageQueue.push(pendingMsg);
+                receiverQueue.push(receiverFd);
+                capturedMsgLen = 0;
+                pendLen = 0;
+            }
+        }
+        return 0;
+    }
+
+public:
+    struct Message{
+        int receiver, sender;
+        std::string message;
+    };
+
+    int process_msg(int sender, char* buffer, size_t len){
+        feed(buffer, len);
+        senderQueue.push(sender);
+        while (!(senderQueue.empty() || receiverQueue.empty() || messageQueue.empty())){
+            Message msg; 
+            msg.sender      = senderQueue.front();
+            msg.receiver    = receiverQueue.front();
+            msg.message     = messageQueue.front();
+
+            senderQueue.pop();
+            receiverQueue.pop();
+            messageQueue.pop();
+        }
+        return 0;
+    }
+};
 
 int main(){
-    int newSocket;
-    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    pollfd fds[MAX_CLIENTS + 1];
+    TCPParser psr;
+
+    int newFd;
     int nfds = 1;
+    int serverFd = socket(AF_INET, SOCK_STREAM, 0);
 
     sockaddr_in serverAddress;   
     socklen_t addrlen = sizeof(serverAddress);
@@ -26,87 +104,72 @@ int main(){
     serverAddress.sin_port          = htons(PORT);
     serverAddress.sin_addr.s_addr   = INADDR_ANY;
         
-    if (bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0){
+    if (bind(serverFd, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0){
         perror("Bind failed");
         return 1;
     }
 
     int opt = 1;
-    if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    if (setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt(SO_REUSEADDR) failed");
         exit(1);
     }
 
-    if (listen(serverSocket, 5) < 0){
+    if (listen(serverFd, 5) < 0){
         perror("Listen failed");
         return 1;
     }
 
-    fds[0].fd = serverSocket;
-    fds[0].events = POLLIN;
-
     std::cout << "Server listening on port " << PORT << "...\n";
     
-    std::queue<std::pair<int, char*>> messageQ;
-    std::queue<std::pair<int, char*>> pending;
-    bool reachCap = false;
-    while (1){
-        int ready = poll(fds, nfds, 0);
-        if (ready < 0){
-            std::cerr << "Poll error\n";
-            break;
-        }
+    int epfd = epoll_create1(0);
+    struct epoll_event ev, events[MAX_CLIENTS];
 
-        if (fds[0].revents & POLLIN){
-            if (nfds < MAX_CLIENTS + 1){
-                reachCap = false;
-                newSocket = accept(serverSocket, (sockaddr*)&serverAddress, &addrlen); 
-                std::cout << "New client connected: " << newSocket << ".\n";
-                fds[nfds].fd = newSocket;
-                fds[nfds].events = POLLIN;
-                nfds++;
-            } else {
-                if (!reachCap){
-                    std::cout << "Reached max capacity.\n";
-                    reachCap = true;
-                }
-            }
-        }
-
-        messageQ = pending;
-        pending = {};
-        for (int i = 1; i < nfds; i++){
-            if (fds[i].revents & POLLIN){
-                char buffer[1024];
-                int bytes = recv(fds[i].fd, buffer, sizeof(buffer), 0);
-                buffer[bytes] = '\0';
-
-                if (bytes <= 0){
-                    std::cout << "Client " << fds[i].fd << " disconnected.\n";
-                    fds[i] = fds[nfds];
-                    nfds--;
-                    i--;
-                    continue;
-                }
-
-                pending.push({fds[i].fd, buffer});
-
-            }
-
-            if (messageQ.size() > 0){
-                std::queue<std::pair<int, char*>>
-                    tmpQ = messageQ;
-                while (!tmpQ.empty()){
-                    std::pair<int, char*> top = tmpQ.front();
-                    std::string msg = "Client " + std::to_string(top.first) + ": " + top.second;
-                    send(fds[i].fd, msg.data(), msg.size(), 0);
-                    tmpQ.pop();
-                }
-            }
-        }
-        messageQ = {};
+    ev.events = EPOLLIN | EPOLLRDHUP;
+    ev.data.fd = serverFd;
+    setNonBlocking(serverFd);
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, serverFd, &ev) < 0){
+        perror("epoll_ctl failed");
     }
 
-    close(serverSocket);
+    while (1){
+        int nfds = epoll_wait(epfd, events, MAX_CLIENTS, 0);
+        if (nfds == 0) continue;
+        if (nfds < 0){ 
+            perror("epoll_wait failed");
+            break;
+        }
+        
+        for (int i = 0; i < nfds; i++){
+            if (events[i].data.fd == serverFd){
+                int clientFd = accept(serverFd, nullptr, nullptr);
+                ev.events = EPOLLIN;
+                ev.data.fd = clientFd;
+                setNonBlocking(clientFd);
+                if (epoll_ctl(epfd, EPOLL_CTL_ADD, clientFd, &ev) < 0){
+                    perror("epoll_ctl failed");
+                }
+                continue;
+            }
+
+            if (events[i].events & EPOLLRDHUP){
+                std::cout << "Client fd" << events[i].data.fd << " disconnected.\n";
+                close(events[i].data.fd);
+                continue;
+            }
+                     
+            if (events[i].events & EPOLLIN){
+                char buffer[PACKET_SIZE];
+                int bytes = read(events[i].data.fd, buffer, sizeof(buffer));
+                psr.process_msg(events[i].data.fd, buffer, sizeof(buffer));
+            }
+                
+            if (events[i].events & EPOLLOUT){
+                
+            }
+        }
+    }
+
+    close(serverFd);
     return 0;
 }

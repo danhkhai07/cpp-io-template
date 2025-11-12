@@ -3,40 +3,48 @@
 
 std::string input = "0015kdmcjdhfngl12jx0008judhdhsb0003bbb";
 
-int msgLen = 0;
-int capturedMsgLen = 1; // bit dimension
-std::string pendingMsg = "";
+struct TCPParser {
+    int msgLen = 0;
+    int capturedMsgLen = 0;
+    char pendingMsg[1024];
+    size_t pendLen = 0;
 
-int splitMessages(std::string packet){
-    for (int i = 0; i < packet.size(); i++){
-        if (capturedMsgLen <= 8){
-            msgLen = packet[i] - 48 + msgLen*10;
-            capturedMsgLen = capturedMsgLen << 1;
-        } else {
-            if (msgLen > 0){
-                pendingMsg += packet[i];
+    int splitMessages(char *packet, int len){
+        for (int i = 0; i < len; ++i, ++packet){
+            char c = *packet;
+            if (capturedMsgLen < 4){
+                msgLen = c - '0' + msgLen*10;
+                capturedMsgLen++;
+            } else {
+                pendingMsg[pendLen] = c;
+                pendLen++;
                 msgLen--;
-            } 
-            if (msgLen == 0){
-                std::cout << pendingMsg << '\n';
-                capturedMsgLen = 1;
-                pendingMsg = "";
+
+                if (msgLen == 0){
+                    std::cout.write(pendingMsg, pendLen);
+                    std::cout << '\n';
+                    capturedMsgLen = 1;
+                    pendLen = 0;
+                }
             }
         }
+        return 0;
     }
-    return 0;
-}
+};
 
 int main(){
+    TCPParser psr;
     int count = 0;
-    std::string tmp;
+    char tmp[1024];
+    int tmpLen = 0;
     for (int i = 0; i < input.size(); i++){
-        tmp += input[i];
+        tmp[tmpLen] = input[i];
+        tmpLen++;
         count++;
         if (count == 3 or i == input.size() - 1){
-            splitMessages(tmp);
+            psr.splitMessages(tmp, tmpLen);
             count = 0;
-            tmp = "";
+            tmpLen = 0;
         } 
     }
     return 0;
