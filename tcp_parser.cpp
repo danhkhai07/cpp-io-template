@@ -33,19 +33,20 @@ struct TCPParser {
 };
 
 int main(){
-    TCPParser psr;
-    int count = 0;
-    char tmp[1024];
-    int tmpLen = 0;
-    for (int i = 0; i < input.size(); i++){
-        tmp[tmpLen] = input[i];
-        tmpLen++;
-        count++;
-        if (count == 3 or i == input.size() - 1){
-            psr.splitMessages(tmp, tmpLen);
-            count = 0;
-            tmpLen = 0;
-        } 
-    }
+    // TCPParser psr;
+    // int count = 0;
+    // char tmp[1024];
+    // int tmpLen = 0;
+    // for (int i = 0; i < input.size(); i++){
+    //     tmp[tmpLen] = input[i];
+    //     tmpLen++;
+    //     count++;
+    //     if (count == 3 or i == input.size() - 1){
+    //         psr.splitMessages(tmp, tmpLen);
+    //         count = 0;
+    //         tmpLen = 0;
+    //     } 
+    // }
+    std::cout << (int) 'A' << ' ' << (int) 'z' << '\n';
     return 0;
 }
