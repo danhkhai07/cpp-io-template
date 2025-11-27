@@ -1,12 +1,14 @@
-#include <cstddef>
-#include <cstdio>
 #include <netinet/in.h>
-#include <cstring>
+#include <string>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
 
+#include <cstring>
+#include <cstdio>
+#include <memory>
 #include <iostream>
 #include <queue>
 #include <unordered_map>
@@ -15,220 +17,199 @@
 
 #define MAX_CLIENTS 5
 #define PORT 65000
-#define PACKET_SIZE 16
+#define PACKET_SIZE 1024
+#define BUF_SIZE 16
 
-int setNonBlocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-struct Parser {
-private:
-    std::queue<int> senderQueue;
-    std::queue<int> receiverQueue;
-    std::queue<std::vector<char>> messageQueue;
-
-    int msgLen = 0;
-    size_t capturedMsgLen = 0;
-
-    int receiverFd = 0;
-    size_t capturedReceiverFd = 0;
-
-    std::vector<char> pendingMsg;
-
-    void feed(char* packet, size_t len) {
-        for (size_t i = 0; i < len; ++i, ++packet) {
-            char c = *packet;
-            if (capturedReceiverFd < 4) {
-                receiverFd = c - '0' + receiverFd * 10;
-                capturedReceiverFd++;
-                continue;
-            }
-
-            if (capturedMsgLen < 4) {
-                msgLen = c - '0' + msgLen * 10;
-                capturedMsgLen++;
-                continue;
-            }
-
-            if (msgLen == 0) {
-                messageQueue.push(pendingMsg);
-                receiverQueue.push(receiverFd);
-
-                pendingMsg.clear();
-                receiverFd = 0;
-                capturedReceiverFd = 0;
-                capturedMsgLen = 0;
-                msgLen = 0;
-            } else {
-                pendingMsg.push_back(c);
-                msgLen--;
-            }
+namespace container {
+    class Request {
+    protected:
+        int destination;
+        std::string raw;
+    public:
+        Request(int dest, std::string rw):
+             destination(dest), raw(rw) {}
+        virtual ~Request() = default;
+        std::string getRaw(){
+            return raw;
         }
-    }
-
-public:
-    struct Message {
-        int sender;
-        size_t offset = 0;
-        std::vector<char> message;
     };
 
-    std::unordered_map<int, std::queue<Message>> openMessageQueue;
-    std::unordered_map<int, bool> epollOutFlags;
-
-    void process_msg(int sender, char* buffer, size_t len) {
-        feed(buffer, len);
-        senderQueue.push(sender);
-
-        while (!senderQueue.empty() && !receiverQueue.empty() && !messageQueue.empty()) {
-            Message msg;
-            msg.sender = senderQueue.front();
-            msg.message = std::move(messageQueue.front());
-
-            int receiver = receiverQueue.front();
-            openMessageQueue[receiver].push(std::move(msg));
-
-            senderQueue.pop();
-            receiverQueue.pop();
-            messageQueue.pop();
+    class Message : public Request {
+    private:
+        std::string msg;
+    public:
+        int sender;
+        std::string getOutput() {
+            return msg;
         }
-    }
+    };
+
+    enum class CommandCode {
+        NULL_CMD
+    };
+
+    class Command : public Request {
+    private:
+    public:
+        CommandCode code = CommandCode::NULL_CMD;
+    };
 };
 
-struct Client{
+class PacketParser {
 private:
-    int nameLen = 0;
-    size_t capturedNameLen = 0;
+    struct ParsingRequest {
+        int lenParsed = 0;
+        
+    };
+    int pending = 0;
+    std::unordered_map<int, std::string> requests;
 
 public:
-    bool nameSet = false;
-    std::string name = "";
+    int feed(int sender, std::string packet){
+        
+    }
 
-    int handleName(char* packet, size_t len){
-        if (nameSet) return -1;
-        for (size_t i = 0; i < len; ++i, ++packet){
-            char c = *packet;
-            if (capturedNameLen < 4){
-                nameLen = c - 48 + nameLen*10;
-                capturedNameLen++;
-                continue;
+    bool empty(){
+        return (pending == 0);
+    } 
+
+    container::Request getRequest();
+};
+
+class Server {
+private:
+    // TCP Parser var
+    PacketParser Parser;
+
+    // Server shit
+    int clientCount = 0;
+    int serverFd;
+    int port;
+    int epfd;
+    sockaddr_in serverAddr;
+    epoll_event events[MAX_CLIENTS + 1];
+
+    // TCP queue shit
+    struct ToSendMessage {
+        int offset = 0;
+        std::string msg;
+    };
+    std::queue<std::unique_ptr<container::Request>> toGetQueue;
+    std::unordered_map<int, std::queue<ToSendMessage>> toSendQueue;
+    
+    int setNonBlocking(int fd) {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags == -1) return -1;
+        return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
+public:
+    Server(){}
+    ~Server(){
+        close(serverFd);
+    }
+    int initialize(int prt){
+        serverFd = socket(AF_INET, SOCK_STREAM, 0);
+        if (serverFd < 0) return -1;  
+
+        serverAddr.sin_addr.s_addr = INADDR_ANY;
+        serverAddr.sin_port = htons(prt);
+        serverAddr.sin_family = INADDR_ANY;
+
+        if (bind(serverFd, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) return -1;
+        if (listen(serverFd, MAX_CLIENTS) < 0) return -1;
+        setNonBlocking(serverFd);
+
+        epoll_event tmp_ev;    
+        tmp_ev.events = EPOLLIN | EPOLLRDHUP;
+        tmp_ev.data.fd = serverFd;
+        epoll_ctl(epfd, EPOLL_CTL_ADD, serverFd, &tmp_ev);
+
+        std::cout << "Server initialized on port: " << PORT << "\n";
+        return 0;
+    }
+
+    int process(){
+        epoll_event tmp_ev;
+        int nfds = epoll_wait(epfd, events, MAX_CLIENTS, 0);
+
+        for (int i = 0; i <= nfds; ++i){
+            int fd = events[i].data.fd;
+
+            if (fd == serverFd){
+                sockaddr_in clientAddr;
+                socklen_t addrLen = sizeof(clientAddr);
+                int clientFd = accept(serverFd, (sockaddr*)&clientAddr, &addrLen);
+                std::string clientIPv4 = inet_ntoa(clientAddr.sin_addr);
+
+                if (clientCount >= MAX_CLIENTS){
+                    close(clientFd);
+                    std::cout << "IP " << clientIPv4 << " tried to connect but failed due to: (probably maxed capacity)\n";
+                    continue;
+                }
+
+                tmp_ev.events = EPOLLIN | EPOLLRDHUP;
+                tmp_ev.data.fd = clientFd;
+                epoll_ctl(epfd, EPOLL_CTL_ADD, clientFd, &tmp_ev);
+                std::cout << "IP " << clientIPv4 << " connected through fd number " << clientFd << ".\n";
             }
 
-            name += c;
-            nameLen--;
-            if (nameLen == 0){
-                nameSet = true;
-                break;
-            } else {
+            if (events[i].events & EPOLLIN){
+                std::string buffer;
+                buffer.resize(BUF_SIZE);
+                size_t bytes = read(fd, buffer.data(), buffer.size());
 
+                if (bytes <= 0) continue;
+                Parser.feed(fd, buffer);
+            }
+
+            if (events[i].events & EPOLLOUT){
+                ToSendMessage* buffer = &toSendQueue[fd].front();
+                int messageSize = std::min((int)buffer->msg.size() - buffer->offset, BUF_SIZE);
+                int sent = send(fd, buffer->msg.data() + buffer->offset, BUF_SIZE, 0);
+                buffer->offset += sent;
+                if (buffer->offset >= buffer->msg.size()) toSendQueue[fd].pop();
+            }
+
+            if (events[i].events & EPOLLRDHUP){
+                close(fd);
+                std::cout << "Client at fd number " << fd << " disconnected.\n";
             }
         }
+
+        return 0;
+    }
+
+    //int poll();
+   
+    /// The queue stores unique_ptr, so you MUST utilize the result, as queue.front() is popped
+    /// immediately after retrieval.
+    int getRequest(std::unique_ptr<container::Request>& result){
+        result = std::move(toGetQueue.front());
+        toGetQueue.pop();
+        return 0;
+    }
+
+    /// ONLY add the request to queue; the queue is processed in process(). 
+    int sendRequest(int fd, std::string msg){
+        ToSendMessage sending;
+        sending.msg = msg;
+        toSendQueue[fd].push(sending);
         return 0;
     }
 };
-std::unordered_map<int, Client> clients;
-
-
 
 int main() {
-    Parser parser;
-
-    int serverFd = socket(AF_INET, SOCK_STREAM, 0);
-
-    sockaddr_in serverAddress{};
-    serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(PORT);
-    serverAddress.sin_addr.s_addr = INADDR_ANY;
-
-    int opt = 1;
-    setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    if (bind(serverFd, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0){ 
-        perror("bind failed");
-        return -1;
-    }
-    if (listen(serverFd, MAX_CLIENTS) < 0){
-        perror("listen failed");
-        return -1;
-    }
-    setNonBlocking(serverFd);
-
-    int epfd = epoll_create1(0);
-    struct epoll_event ev{}, events[MAX_CLIENTS];
-
-    ev.events = EPOLLIN | EPOLLRDHUP;
-    ev.data.fd = serverFd;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, serverFd, &ev);
-
-    while (true) {
-        int nfds = epoll_wait(epfd, events, MAX_CLIENTS, -1);
-        if (nfds < 0) { perror("epoll_wait"); break; }
-
-        for (int i = 0; i < nfds; i++) {
-            int fd = events[i].data.fd;
-
-            if (fd == serverFd) {
-                int clientFd = accept(serverFd, nullptr, nullptr);
-                std::cout << "Client " << clientFd << " connected.\n";
-                setNonBlocking(clientFd);
-                ev.events = EPOLLIN | EPOLLRDHUP | EPOLLOUT;
-                ev.data.fd = clientFd;
-                epoll_ctl(epfd, EPOLL_CTL_ADD, clientFd, &ev);
-                continue;
-            }
-
-            if (events[i].events & EPOLLRDHUP) {
-                std::cout << "Client '" << clients[fd].name << "' disconnected.\n";
-                close(fd);
-                parser.openMessageQueue.erase(fd);
-                parser.epollOutFlags.erase(fd);
-                clients.erase(fd);
-                continue;
-            }
-
-            if (events[i].events & EPOLLIN) {
-                size_t bufferSize = (clients[fd].nameSet ? PACKET_SIZE : 1);
-                std::string buffer;
-                buffer.resize(bufferSize);
-                int bytes = read(fd, buffer.data(), bufferSize);
-                if (bytes <= 0) continue;
-                if (!clients[fd].nameSet){
-                    clients[fd].handleName(buffer.data(), 1);
-                    continue;
-                }
-                parser.process_msg(fd, buffer.data(), bytes);
-            }
-
-            if (events[i].events & EPOLLOUT) {
-                auto& queue = parser.openMessageQueue[fd];
-                while (!queue.empty()) {
-                    Parser::Message& msg = queue.front();
-                    int toSend = std::min(PACKET_SIZE, (int)(msg.message.size() - msg.offset));
-                    int sent = send(fd, msg.message.data() + msg.offset, toSend, 0);
-                    if (sent <= 0) break; // EAGAIN or error
-
-                    msg.offset += sent;
-                    if (msg.offset == msg.message.size()) queue.pop();
-                }
-            }
-        }
-
-        for (auto& kv : parser.openMessageQueue) {
-            bool wantOut = !kv.second.empty();
-            if (wantOut != parser.epollOutFlags[kv.first]) {
-                parser.epollOutFlags[kv.first] = wantOut;
-                ev.events = EPOLLIN | EPOLLRDHUP;
-                if (wantOut) ev.events |= EPOLLOUT;
-                ev.data.fd = kv.first;
-                epoll_ctl(epfd, EPOLL_CTL_MOD, kv.first, &ev);
-            }
-            parser.epollOutFlags[kv.first] = wantOut;
+    Server Server;
+    Server.initialize();
+    while (1){
+        Server.poll();
+        if ( != nullptr){
+            std::unique_ptr<Request> request(Server.get());
+            request = request.process();
         }
     }
 
-    close(serverFd);
     return 0;
 }
 

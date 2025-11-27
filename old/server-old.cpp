@@ -137,7 +137,7 @@ int main() {
 
     int serverFd = socket(AF_INET, SOCK_STREAM, 0);
 
-    sockaddr_in serverAddress{};
+    sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_port = htons(PORT);
     serverAddress.sin_addr.s_addr = INADDR_ANY;
@@ -156,7 +156,7 @@ int main() {
     setNonBlocking(serverFd);
 
     int epfd = epoll_create1(0);
-    struct epoll_event ev{}, events[MAX_CLIENTS];
+    struct epoll_event ev, events[MAX_CLIENTS];
 
     ev.events = EPOLLIN | EPOLLRDHUP;
     ev.data.fd = serverFd;
