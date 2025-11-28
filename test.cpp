@@ -18,7 +18,7 @@
 #include <vector>
 #include <algorithm>
 
-#define MAX_CLIENTS 5
+#define MAX_CLIENTS 0
 #define PACKET_SIZE 1024
 #define BUF_SIZE 128
 #define MSG_LEN_BYTES 4
@@ -187,7 +187,7 @@ public:
     ~Server(){
         close(serverFd);
     }
-    int initialize(int prt){
+    int initialize(uint16_t prt){
         serverFd = socket(AF_INET, SOCK_STREAM, 0);
         if (serverFd < 0) return -1;  
 
@@ -196,8 +196,17 @@ public:
         port = prt;
         serverAddr.sin_family = AF_INET;
 
-        if (bind(serverFd, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) return -1;
-        if (listen(serverFd, MAX_CLIENTS) < 0) return -1;
+        int opt = 1;
+        setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        if (bind(serverFd, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0){
+            perror("bind failed");
+            return -1;
+        }
+        if (listen(serverFd, MAX_CLIENTS) < 0){
+            perror("listen failed");
+            return -1;
+        }
         setNonBlocking(serverFd);
 
         epfd = epoll_create1(0);
@@ -287,21 +296,21 @@ namespace handler {
 }
 
 int main(int argc, char** argv){
-    if (sizeof(argv) < 2) {
+    if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " [PORT]\n";
         return -1;
     }
 
-    if (sizeof(argv) > 2) {
+    if (argc > 2) {
         std::cout << "Error: Too many arguments.\n";
         std::cout << "Usage: " << argv[0] << " [PORT]\n";
         return -1;
     }
-    int port = std::stoi(argv[1]);
+    uint16_t port = std::stoi(argv[1]);
 
     // manager's work
     Server server;
-    server.initialize(port);
+    if (server.initialize(port) < 0) return -1;
     while(true){
         server.process();
     }
