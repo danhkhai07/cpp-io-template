@@ -209,7 +209,7 @@ public:
 
     int process(){
         epoll_event tmp_ev;
-        int nfds = epoll_wait(epfd, events, MAX_CLIENTS, 0);
+        int nfds = epoll_wait(epfd, events, MAX_CLIENTS + 1, 0);
 
         for (int i = 0; i < nfds; ++i){
             int fd = events[i].data.fd;
@@ -372,9 +372,11 @@ int main(int argc, char** argv){
     while(true){
         server.process();
         std::unique_ptr<container::Request> req;
-        server.getRequest(req);
-        if (dispatcher.dispatch(req) < 0){;
-            server.dropClient(req->sender);
+        if (server.canGet()){
+            server.getRequest(req);
+            if (dispatcher.dispatch(req) < 0){;
+                server.dropClient(req->sender);
+            }
         }
     }
     return 0;
