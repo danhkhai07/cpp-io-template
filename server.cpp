@@ -229,7 +229,7 @@ public:
             if (events[i].events & EPOLLIN){
                 std::string buffer;
                 buffer.resize(BUF_SIZE);
-                size_t bytes = read(fd, buffer.data(), buffer.size());
+                int bytes = read(fd, buffer.data(), buffer.size());
                 if (bytes <= 0) {
                     if (bytes == 0) {
                         // connection closed
@@ -254,6 +254,7 @@ public:
                     tmp_ev.data.fd = fd;
                     tmp_ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR; 
                     epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &tmp_ev);
+                    continue;
                 }
 
                 ToSendMessage* buffer = &sendQueue[fd].front();
