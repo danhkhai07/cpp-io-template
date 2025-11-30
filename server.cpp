@@ -202,8 +202,10 @@ public:
         epoll_event tmp_ev;
         int nfds = epoll_wait(epfd, events, MAX_CLIENTS + 1, 0);
 
-        if (!parser.canRetrieve()){
-            
+        while (parser.canRetrieve()){
+            std::unique_ptr<container::Request> tmp;
+            parser.getRequest(tmp);
+            getQueue.push(std::move(tmp));
         }
 
         for (int i = 0; i < nfds; ++i){ int fd = events[i].data.fd;
@@ -288,6 +290,7 @@ public:
     /// The queue stores unique_ptr, so you MUST utilize the result, as queue.front() is popped
     /// immediately after retrieval.
     int getRequest(std::unique_ptr<container::Request>& dest){
+        std::cout << "Reached getRequest()\n";
         if (!canGet()) return -1;
         dest = std::move(getQueue.front());
         getQueue.pop();
@@ -346,6 +349,7 @@ public:
     }
 
     int dispatch(std::unique_ptr<container::Request> &req){
+        std::cout << "Reached dispatch()\n";
         auto it = handlers.find(req->opcode);
         if (it == handlers.end()) return -1;
         return it->second.call(req);
@@ -380,6 +384,7 @@ int main(int argc, char** argv){
         server.process();
         std::unique_ptr<container::Request> req;
         if (server.canGet()){
+            std::cout << "Passed canGet()\n";
             server.getRequest(req);
             if (dispatcher.dispatch(req) < 0){;
                 server.dropClient(req->sender);
