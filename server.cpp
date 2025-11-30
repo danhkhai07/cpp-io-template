@@ -1,5 +1,6 @@
 #include <compare>
 #include <cstdint>
+#include <ctime>
 #include <netinet/in.h>
 #include <string>
 #include <sys/epoll.h>
@@ -8,6 +9,7 @@
 #include <fcntl.h>
 #include <arpa/inet.h>
 
+#include <functional>
 #include <cstring>
 #include <cstdio>
 #include <memory>
@@ -15,54 +17,57 @@
 #include <queue>
 #include <deque>
 #include <unordered_map>
-#include <vector>
 #include <algorithm>
 
 #define MAX_CLIENTS 5
 #define PACKET_SIZE 1024
 #define BUF_SIZE 128
-#define MSG_LEN_BYTES 4
 
 namespace container {
-    class Request {
-    protected:
-        int sender;
+    struct Request {
+        int sender = -1;
+        uint8_t opcode = 0;
         std::string raw;
-    public:
-        Request(int sndr, std::string rw):
-             sender(sndr), raw(rw) {}
+
+        Request() = default;
+        Request(int sndr, uint8_t op, std::string rw):
+             sender(sndr), opcode(op), raw(rw) {}
         virtual ~Request() = default;
-        std::string getRaw(){
-            return raw;
-        }
     };
 
-    class Message : public Request {
+    struct Message : public Request {
     private:
         std::string msg;
     public:
-        int receiver;
+        int receiver = -1;
+
+        Message(std::unique_ptr<Request> &req): Request(*req) {};
         std::string getOutput() {
             return msg;
         }
     };
 
-    enum class CommandCode {
-        NULL_CMD
+    enum CommandCode {
+        NULL_CMD = 0, P_NAME_REGISTER,  
     };
 
-    class Command : public Request {
+    struct Command : public Request {
     private:
     public:
         CommandCode code = CommandCode::NULL_CMD;
+
+        Command(std::unique_ptr<Request> &req): Request(*req) {};
     };
 };
 
 class PacketParser {
 private:
     struct Buffer {
-        int lenParsed = 0;
-        int len = 0;
+        uint8_t lenParsed = 0;
+        uint16_t len = 0;
+
+        uint8_t opParsed = 0;
+        uint8_t opcode = 0;
         std::string raw;
         bool doneParsed = false;
 
@@ -85,24 +90,27 @@ public:
 
         for (size_t i = 0; i < packet.size(); ++i){
             char c = packet[i];
-            if (buf->lenParsed < MSG_LEN_BYTES){
-                buf->len = buf->len*10 + c - '0';
+            // parse opcode
+            if (buf->opParsed < 1){
+                buf->opcode |= static_cast<uint8_t>(c);
+                buf->opParsed++;
+                continue;
+            }
+            // parse length
+            if (buf->lenParsed < 2){
+                buf->len = (buf->len << 8) | static_cast<uint8_t>(c);
                 buf->lenParsed++;
-                if (buf->lenParsed >= MSG_LEN_BYTES){
-                    if (buf->len == 0){
-                        std::cout << "PacketParser::feed: Warning: Packet with length 0 found.\n";
-                        buf->lenParsed = 0;
-                        i--;
-                        continue;
-                    }
-                }
+                if (buf->lenParsed >= 2 && buf->len == 0){
+                    std::cout << "PacketParser::feed: Warning: Packet with length 0 found.\n";
+                    buf->lenParsed = 0;
+                    i--;
+                 }
                 continue;
             }
 
-
             buf->raw += c;
             buf->len--;
-               
+                
             if (buf->len == 0){
                 buf->doneParsed = true;
                 completedNBufs[owner]++;
@@ -120,19 +128,18 @@ public:
         return (completedNBufs[owner] == 0);
     } 
 
-     int getRequest(int owner, std::unique_ptr<container::Request> &result){
+    int getRequest(int owner, std::unique_ptr<container::Request> &result){
+        if (buffers[owner].empty()){
+            std::cout << "PacketParser::getRequest: Bad call: Queue is empty.\n";
+            return -1;
+        }
         Buffer* buf = &buffers[owner].front();
         if (!buf->doneParsed){
             std::cout << "PacketParser::getRequest: Bad call: Incompleted packet.\n";
             return -1;
         }
 
-        std::unique_ptr<container::Request> tmp = std::make_unique<container::Request>(
-            owner,
-            buf->raw
-        );
-        result = std::move(tmp);
-
+        result = std::make_unique<container::Request>(owner, buf->opcode, buf->raw);
         buffers[owner].pop_front();
         completedNBufs[owner]--;
         return 0;
@@ -145,10 +152,10 @@ private:
     PacketParser Parser;
 
     // Server shit
-    int clientCount = 0;
+    uint32_t clientCount = 0;
     int serverFd;
-    uint16_t port;
     int epfd;
+    uint16_t port;
     sockaddr_in serverAddr;
     epoll_event events[MAX_CLIENTS + 1];
 
@@ -166,23 +173,24 @@ private:
         return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
 
-    void cleanUp(int fd){
+    void closeClient(int fd){
         sendQueue.erase(fd);
         close(fd);
     }
 
 public:
-    Server(){}
     ~Server(){
-        close(serverFd);
+        if (serverFd >= 0) close(serverFd);
+        if (epfd >= 0) close(epfd);
     }
-    int initialize(int prt){
+
+    int initialize(uint16_t p){
+        port = p;
         serverFd = socket(AF_INET, SOCK_STREAM, 0);
         if (serverFd < 0) return -1;  
 
         serverAddr.sin_addr.s_addr = INADDR_ANY;
-        serverAddr.sin_port = htons(prt);
-        port = prt;
+        serverAddr.sin_port = htons(port);
         serverAddr.sin_family = AF_INET;
 
         if (bind(serverFd, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) return -1;
@@ -201,7 +209,7 @@ public:
 
     int process(){
         epoll_event tmp_ev;
-        int nfds = epoll_wait(epfd, events, MAX_CLIENTS, 0);
+        int nfds = epoll_wait(epfd, events, MAX_CLIENTS + 1, 0);
 
         for (int i = 0; i < nfds; ++i){
             int fd = events[i].data.fd;
@@ -228,22 +236,37 @@ public:
                 std::string buffer;
                 buffer.resize(BUF_SIZE);
                 size_t bytes = read(fd, buffer.data(), buffer.size());
-                buffer.resize(bytes + 1);
+                buffer.resize(bytes);
 
-                std::cout << buffer << '\n';
                 if (bytes > 0) Parser.feed(fd, buffer);
             }
 
             if (events[i].events & EPOLLOUT){
+                if (sendQueue[fd].empty()){
+                    // false call
+                    epoll_event tmp_ev;
+                    tmp_ev.data.fd = fd;
+                    tmp_ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR; 
+                    epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &tmp_ev);
+                }
+
                 ToSendMessage* buffer = &sendQueue[fd].front();
                 int messageSize = std::min((int)buffer->msg.size() - buffer->offset, BUF_SIZE);
-                int sent = send(fd, buffer->msg.data() + buffer->offset, BUF_SIZE, 0);
-                buffer->offset += sent;
-                if (buffer->offset >= buffer->msg.size()) sendQueue[fd].pop();
+                int sent = send(fd, buffer->msg.data() + buffer->offset, messageSize, 0);
+                if (sent == -1) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        continue;
+                    }
+                    closeClient(fd);
+                    std::cout << "Client at fd number " << fd << " disconnected.\n";
+                } else {
+                    buffer->offset += sent;
+                    if (buffer->offset >= buffer->msg.size()) sendQueue[fd].pop();
+                }
             }
 
             if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)){
-                cleanUp(fd);
+                closeClient(fd);
                 std::cout << "Client at fd number " << fd << " disconnected.\n";
             }
         }
@@ -251,10 +274,15 @@ public:
         return 0;
     }
 
+    bool canGet(){
+        return (!getQueue.empty()); 
+    }
+
     /// The queue stores unique_ptr, so you MUST utilize the result, as queue.front() is popped
     /// immediately after retrieval.
-    int getRequest(std::unique_ptr<container::Request>& result){
-        result = std::move(getQueue.front());
+    int getRequest(std::unique_ptr<container::Request>& dest){
+        if (!canGet()) return -1;
+        dest = std::move(getQueue.front());
         getQueue.pop();
         return 0;
     }
@@ -264,17 +292,58 @@ public:
         ToSendMessage sending;
         sending.msg = msg;
         sendQueue[fd].push(sending);
+        epoll_event tmp_ev;
+        tmp_ev.data.fd = fd;
+        tmp_ev.events |= EPOLLOUT;
+        epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &tmp_ev);
+        return 0;
+    }
+
+    int dropClient(int fd){
+        std::cout << "Dropping client on fd number " << fd << " due to errors.\n";
+        closeClient(fd);
         return 0;
     }
 };
 
-namespace dispatcher {
-    
-}
+class Handler {
+public:
+    int handleMessage(std::unique_ptr<container::Request>& Msg) {
+        std::cout << "handler::handleMessage: Handling \"" << Msg->raw << "\"\n";
+        return 0;
+    }
 
-namespace handler {
+    int handleCommand(std::unique_ptr<container::Request>& Cmd) {
+        std::cout << "handler::handleCommand: Handling \"" << Cmd->raw << "\"\n";
+        return 0;
+    }
+};
 
-}
+class Dispatcher {
+private:
+    struct Callback {
+        Handler* obj;
+        int (Handler::*func)(std::unique_ptr<container::Request>&);
+        int call(std::unique_ptr<container::Request>& param){
+            return (obj->*func)(param);
+        }
+    };
+    std::unordered_map<int, Callback> handlers;
+public:
+    void registerHandler(int opcode, Handler* h, int (Handler::*f)(std::unique_ptr<container::Request>&)){
+        Callback cal;
+        cal.obj = h;
+        cal.func = f;
+        handlers[opcode] = {h,f};
+        return;
+    }
+
+    int dispatch(std::unique_ptr<container::Request> &req){
+        auto it = handlers.find(req->opcode);
+        if (it == handlers.end()) return -1;
+        return it->second.call(req);
+    }
+};
 
 int main(int argc, char** argv){
     if (argc < 2) {
@@ -289,11 +358,24 @@ int main(int argc, char** argv){
     }
     int port = std::stoi(argv[1]);
 
-    // manager's work
+// manager's work
+    // setting up operational objects
     Server server;
+    Dispatcher dispatcher;
+    Handler handler;
+
+    dispatcher.registerHandler(1, &handler, &Handler::handleMessage);
+    dispatcher.registerHandler(2, &handler, &Handler::handleCommand);
+
+    // logic
     server.initialize(port);
     while(true){
         server.process();
+        std::unique_ptr<container::Request> req;
+        server.getRequest(req);
+        if (dispatcher.dispatch(req) < 0){;
+            server.dropClient(req->sender);
+        }
     }
     return 0;
 }
