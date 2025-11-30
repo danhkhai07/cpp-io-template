@@ -69,6 +69,10 @@ private:
         uint8_t opParsed = 0;
         uint8_t opcode = 0;
         std::string raw;
+
+        void reset(){
+            *this = Buffer();
+        }
     };
 
     std::queue<std::unique_ptr<container::Request>> completedPackets;
@@ -96,10 +100,7 @@ public:
                 buf->lenParsed++;
                 if (buf->lenParsed >= 2 && buf->len == 0){
                     std::cout << "PacketParser::feed: Warning: Packet with length 0 found.\n";
-                    buf->opParsed = 0;
-                    buf->opcode = 0;
-                    buf->lenParsed = 0;
-                    i--;
+                    buf->reset();
                  }
                 continue;
             }
