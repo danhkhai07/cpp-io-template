@@ -26,11 +26,11 @@
 namespace container {
     struct Request {
         int sender = -1;
-        uint8_t opcode = 0;
+        int opcode = 0;
         std::string raw;
 
         Request() = default;
-        Request(int sndr, uint8_t op, std::string rw):
+        Request(int sndr, int op, std::string rw):
              sender(sndr), opcode(op), raw(rw) {}
         virtual ~Request() = default;
     };
@@ -67,7 +67,7 @@ private:
         uint16_t len = 0;
 
         uint8_t opParsed = 0;
-        uint8_t opcode = 0;
+        int opcode = 0;
         std::string raw;
 
         void reset(){
@@ -90,7 +90,7 @@ public:
             char c = packet[i];
             // parse opcode
             if (buf->opParsed < 1){
-                buf->opcode |= static_cast<uint8_t>(c);
+                buf->opcode = static_cast<int>(c) - 48;
                 buf->opParsed++;
                 continue;
             }
@@ -101,7 +101,7 @@ public:
                 if (buf->lenParsed >= 2 && buf->len == 0){
                     std::cout << "PacketParser::feed: Warning: Packet with length 0 found.\n";
                     buf->reset();
-                 }
+                }
                 continue;
             }
 
@@ -165,6 +165,7 @@ private:
     }
 
     void closeClient(int fd){
+        clientCount--;
         sendQueue.erase(fd);
         close(fd);
     }
@@ -226,6 +227,7 @@ public:
                 tmp_ev.data.fd = clientFd;
                 epoll_ctl(epfd, EPOLL_CTL_ADD, clientFd, &tmp_ev);
                 std::cout << "IP " << clientIPv4 << " connected through fd number " << clientFd << ".\n";
+                clientCount++;
                 continue;
             }
 
@@ -240,8 +242,8 @@ public:
                         std::cout << "Client at fd number " << fd << " disconnected.\n";
                     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
                         // real error
+                        std::cout << "Read error on fd " << fd << ". Closing client.\n";
                         closeClient(fd);
-                        std::cout << "Read error on fd " << fd << "\n";
                     }
                     continue;
                 }
@@ -290,7 +292,6 @@ public:
     /// The queue stores unique_ptr, so you MUST utilize the result, as queue.front() is popped
     /// immediately after retrieval.
     int getRequest(std::unique_ptr<container::Request>& dest){
-        std::cout << "Reached getRequest()\n";
         if (!canGet()) return -1;
         dest = std::move(getQueue.front());
         getQueue.pop();
@@ -344,12 +345,11 @@ public:
         Callback cal;
         cal.obj = h;
         cal.func = f;
-        handlers[opcode] = {h,f};
+        handlers[opcode] = cal;
         return;
     }
 
     int dispatch(std::unique_ptr<container::Request> &req){
-        std::cout << "Reached dispatch()\n";
         auto it = handlers.find(req->opcode);
         if (it == handlers.end()) return -1;
         return it->second.call(req);
@@ -383,9 +383,7 @@ int main(int argc, char** argv){
     while(true){
         server.process();
         std::unique_ptr<container::Request> req;
-        std::cout << server.canGet() << '\n';
         if (server.canGet()){
-            std::cout << "Passed canGet()\n";
             server.getRequest(req);
             if (dispatcher.dispatch(req) < 0){;
                 server.dropClient(req->sender);
@@ -394,4 +392,3 @@ int main(int argc, char** argv){
     }
     return 0;
 }
-

@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <iostream>
 #include <cstring>
 #include <ostream>
@@ -17,7 +18,7 @@ void receiveMessage(int fd){
     char buffer[MSG_SIZE];
     for (;;){
         int bytes = recv(fd, buffer, sizeof(buffer), 0);
-        if (bytes <= 0) return; 
+        if (bytes == 0) continue; 
         buffer[bytes] = '\0';
  
         std::cout << "\r" << buffer << "\n";
@@ -32,6 +33,7 @@ int main(){
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_port = htons(PORT);
     serverAddress.sin_addr.s_addr = INADDR_ANY;
+    //inet_pton(AF_INET, "36.50.55.225", &serverAddress.sin_addr.s_addr);
 
     if (connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0){
         std::cout << "Connection failed!\n";
@@ -40,50 +42,25 @@ int main(){
     std::cout << "Connection succeeded!\n";
 
     auto sendMsg = [clientSocket](std::string message){
-        if (message.size() > MSG_SIZE - 4|| message.size() < 1){
+        if (message.size() > MSG_SIZE - 4 || message.size() < 1){
             std::cout << "Error: Cannot send message of that size.\n";
             return -1;
         }
 
-        size_t msgLen = message.size();
-        std::string zeros = "0000";
-        while (msgLen > 0){
-            msgLen /= 10;
-            zeros.pop_back();
-        }
-        message = zeros + std::to_string(message.size());
+        uint16_t msgLen = message.size();
+        uint8_t c1 = (msgLen >> 8) & 0xFF;
+        uint8_t c2 = msgLen & 0xFF;
+        std::string packet;
+        packet.push_back('1');
+        packet.push_back(c1);
+        packet.push_back(c2);
+        packet += message;
         
-        send(clientSocket, message.c_str(), message.size(), 0);
+        send(clientSocket, packet.c_str(), packet.size(), 0);
         return 0;
     };
     
-    // prompting name
-    std::string name;
-    {
-        while (1){
-            std::cout << "Choose your nick name: ";
-            std::getline(std::cin, name);
-            
-            if (name.size() < 3 || name.size() > 16){
-                std::cout << "Your nick name must be in between 3 and 16 characters.\n";
-                continue;
-            }
-
-            bool flag = true;
-            for (char c:name){
-                if (!((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= 9) 
-                        or c == '.' or c == '-' or c == '_')){
-                    std::cout << "Your nick name cannot contain special characters.\n";
-                    break;
-                }
-            }
-            if (!flag) continue;
-            sendMsg(name);
-            break;
-        }
-    }
-
-    std::cout << "\nNote: While prompting, you may lose the current input due to new messages coming in. In that case, keep typing. The message isn't lost in memory, just invisible.\n\n";
+    std::cout << "Note: While prompting, you may lose the current input due to new messages coming in. In that case, keep typing. The message isn't lost in memory, just invisible.\n";
 
     std::thread t(receiveMessage, clientSocket);
 
@@ -91,7 +68,7 @@ int main(){
     std::string message;
     while (std::getline(std::cin, message)){
         sendMsg(message);
-        std::cout << "\033[A\033[K> ";
+        std::cout << "> ";
     }
 
     close(clientSocket);
