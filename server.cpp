@@ -28,17 +28,40 @@
 
 namespace metadata {
     std::unordered_set<int> onlineFds;
-    std::unordered_map<int, bool> hasName(false);
 
+    std::unordered_map<int, bool> hasName;
     std::unordered_map<std::string, int> nameFdMap;
     std::unordered_map<int, std::string> fdNameMap;
 
-    void removeFdName(int fd){
-        
+    int removeFdName(int fd){
+        auto it = fdNameMap.find(fd);      
+        if (it != fdNameMap.end()){
+            nameFdMap.erase(it->second);
+            fdNameMap.erase(fd);
+            hasName.erase(fd);
+        } else {
+            std::cout << "metadata::removeFdName: Cannot find fd " << fd << ".\n";
+            return -1;
+        }
+        return 0;
     }
 
-    void addFdName(int fd){
+    int addFdName(int fd, const std::string& name){
+        if (hasName[fd]){ 
+            std::cout << "metadata::addFdName: Client " << fd << " already has a name by " << fdNameMap[fd] <<".\n";
+            return -1;
+        }
 
+        auto it = nameFdMap.find(name);
+        if (it != nameFdMap.end()){
+            std::cout << "metadata::addFdName: " << name << " already exists.\n";
+            return -1;
+        }
+
+        fdNameMap[fd] = name;
+        nameFdMap[name] = fd;
+        hasName[fd] = true;
+        return 0;
     }
 }
 
@@ -73,6 +96,7 @@ namespace container {
         P_NAME_REGISTER, 
         P_SEND_MSG, 
         G_CURRENT_ONLINE, 
+        G_HELP
     };
 
     struct Command : public Request {
@@ -146,7 +170,9 @@ public:
             buf->len--;
                 
             if (buf->len == 0){
-                completedPackets.push(categorize(sender, buf->opcode, buf->raw));
+                std::unique_ptr<container::Request> req = categorize(sender, buf->opcode, buf->raw);
+                if (req == nullptr) return -1;
+                completedPackets.push(std::move(req));
                 buffers[sender].pop_front();
 
                 if (i + 1 < packet.size()){
@@ -201,12 +227,16 @@ private:
         return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
 
+    void addClient(int fd){
+        clientCount++;
+        metadata::onlineFds.insert(fd);
+        metadata::hasName[fd] = false;
+    }
+
     void closeClient(int fd){
         clientCount--;
         sendQueue.erase(fd);
-        std::string clientName = metadata::fdNameMap[fd];
-        metadata::nameFdMap.erase(clientName);
-        metadata::fdNameMap.erase(fd);
+        metadata::removeFdName(fd);
         metadata::onlineFds.erase(fd);
         close(fd);
     }
@@ -268,10 +298,9 @@ public:
                 tmp_ev.data.fd = clientFd;
                 epoll_ctl(epfd, EPOLL_CTL_ADD, clientFd, &tmp_ev);
                 std::cout << "IP " << clientIPv4 << " connected through fd number " << clientFd << ".\n";
-                clientCount++;
+                addClient(clientFd);
                 continue;
             }
-
             if (events[i].events & EPOLLIN){
                 std::string buffer;
                 buffer.resize(BUF_SIZE);
@@ -290,7 +319,13 @@ public:
                 }
                 buffer.resize(bytes);
 
-                if (bytes > 0) parser.feed(fd, buffer);
+                int feedReturn;
+                if (bytes > 0) feedReturn = parser.feed(fd, buffer);
+                if (feedReturn < 0){
+                    std::cout << "Server::process: An error occur when feeding packets of client " << fd << ".\n";
+                    std::cout << "Server::process: Dropping client " << fd << ".\n";
+                    continue;
+                }
             }
 
             if (events[i].events & EPOLLOUT){
@@ -330,8 +365,8 @@ public:
         return (!getQueue.empty()); 
     }
 
-    /// The queue stores unique_ptr, so you MUST utilize the result, as queue.front() is popped
-    /// immediately after retrieval.
+    /// The queue stores unique_ptr, so you MUST utilize the result, as queue.front is popped
+    /// immediately after retrieval. int getRequest(std::unique_ptr<container::Request>& dest){
     int getRequest(std::unique_ptr<container::Request>& dest){
         if (!canGet()) return -1;
         dest = std::move(getQueue.front());
@@ -368,15 +403,16 @@ private:
         };
 
     std::vector<std::string> parseToken(std::string_view raw){
-        std::vector<std::string> res;  
-        std::string word;
-        for (int i = 0; i < raw.size(); i++){
-            word += raw[i];
-            if (i == raw.size() - 1 || raw[i+1] == ' '){
-                res.push_back(word);
-                i++;
+        std::vector<std::string> res;
+        std::string w;
+        for (char c : raw){
+            if (c == ' '){
+                if (!w.empty()){ res.push_back(w); w.clear(); }
+            } else {
+                w.push_back(c);
             }
         }
+        if (!w.empty()) res.push_back(w);
         return res;
     }
 
@@ -388,7 +424,7 @@ public:
 
         //refuse to let unnamed users send messages
         if (!metadata::hasName[Msg->sender]){
-            msg = "Cannot send messages while unnamed. To name yourself, use command \"/setname\" as follows:\nUsage: /setname [NAME]";
+            msg = "[SERVER] Cannot send messages while unnamed. To name yourself, use command \"/setname\" as follows:\nUsage: /setname [NAME]";
             server.sendPacket(Msg->sender, msg);
             return 0;
         }
@@ -400,16 +436,19 @@ public:
         if (Msg->tokens[0][0] != '/'){
             //global message
             Msg->receiver = metadata::onlineFds;
+            msg = "[GLOBAL] " + metadata::fdNameMap[Msg->sender] + ": " + msg;
         } else {
             //personal message
+            Msg->receiver.insert(Msg->sender);
             auto recv = metadata::nameFdMap.find(Msg->tokens[1]);
             if (recv == metadata::nameFdMap.end()){
-                msg = "Cannot find user with that name.";
+                msg = "[SERVER] Cannot find user with that name.";
                 server.sendPacket(Msg->sender, msg);
                 return 0;
             }
             Msg->receiver.insert(recv->second);
             msg = msg.substr(Msg->tokens[0].size(), msg.size() - Msg->tokens[0].size() - 1);
+            msg = "[PERSONAL] " + metadata::fdNameMap[Msg->sender] + ": " + msg;
         }
         
         for (int i:Msg->receiver){
@@ -433,18 +472,18 @@ public:
         std::string msg;
         switch (cmdCode){
             case container::CommandCode::NULL_CMD:
-                msg = "Unknown opcode.";
+                msg = "[SERVER] Unknown command.";
                 break;
 
             case container::CommandCode::P_NAME_REGISTER:
             {
                 if (Cmd->tokens.size() < 2 || Cmd->tokens.size() > 2){
-                    msg = "Incorrect argument format.\nUsage: /setname [NAME]";
+                    msg = "[SERVER] Incorrect argument format.\nUsage: /setname [NAME]";
                     break;
                 }
 
                 if (metadata::hasName[Cmd->sender]){
-                    msg = "Your name has already been set!";
+                    msg = "[SERVER] Your name has already been set!";
                     break;
                 }    
 
@@ -453,22 +492,22 @@ public:
                     auto it = metadata::nameFdMap.find(newUsername);
                     if (it != metadata::nameFdMap.end() ){ 
                         if (it->second != Cmd->sender)
-                            msg = "Username is already taken.";
+                            msg = "[SERVER] Username is already taken.";
                         else 
-                            msg = "Are you trippin'?";
+                            msg = "[SERVER] Are you trippin'?";
                         break;
                     }
                 }
 
-                metadata::addFdName(Cmd->sender);
-                msg = "Username successfully set!";
+                metadata::addFdName(Cmd->sender, newUsername);
+                msg = "[SERVER] Username successfully set!";
                 break;
             }
 
             case container::CommandCode::P_SEND_MSG:
             {
                 if (Cmd->tokens.size() < 3){
-                    msg = "Incorrect argument format.\nUsage: /msg [USERNAME] [MESSAGE]";
+                    msg = "[SERVER] Incorrect argument format.\nUsage: /msg [USERNAME] [MESSAGE]";
                     break;
                 }
                 handleMessage(server, Req);
@@ -478,11 +517,11 @@ public:
             case container::CommandCode::G_CURRENT_ONLINE:
             {    
                 if (Cmd->tokens.size() > 1){
-                    msg = "Incorrect argument format.\nUsage: /onlines";
+                    msg = "[SERVER] Incorrect argument format.\nUsage: /onlines";
                     break;
                 }
 
-                msg = "Active list:\n";
+                msg = "[SERVER] Active list:\n";
                 for (int i:metadata::onlineFds){
                     if (metadata::hasName[i]){
                         msg.push_back('\t');
@@ -490,6 +529,18 @@ public:
                         msg.push_back('\n');
                     }
                 }
+                break;
+            }
+            
+            case container::CommandCode::G_HELP:
+            {
+                msg = "To chat globally, simply type directly after '>' symbol.\n Available commands include:\n \t/help\t: Display this text.\n \t/setname [NAME]\t: Set your own name before texting.\n \t/onlines\t: Display currently online users.\n \t/msg [NAME] [MESSAGE]\t: Message privately with an active user.\n";
+                // To chat globally, simply type directly after '>' symbol.\n
+                // Available commands include:\n
+                // \t/help\t: Display this text.\n
+                // \t/setname [NAME]\t: Set your own name before texting.\n
+                // \t/onlines\t: Display currently online users.\n
+                // \t/msg [NAME] [MESSAGE]\t: Message privately with an active user.\n
                 break;
             }
         }

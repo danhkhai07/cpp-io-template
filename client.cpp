@@ -42,16 +42,19 @@ int main(){
     std::cout << "Connection succeeded!\n";
 
     auto sendMsg = [clientSocket](std::string message){
-        if (message.size() > MSG_SIZE - 4 || message.size() < 1){
+        if (message.size() > MSG_SIZE - 3 || message.size() < 1){
             std::cout << "Error: Cannot send message of that size.\n";
             return -1;
         }
 
         uint16_t msgLen = message.size();
+        uint8_t opcode;
+        if (message[0] != '/') opcode = 1;
+        else opcode = 2;
         uint8_t c1 = (msgLen >> 8) & 0xFF;
         uint8_t c2 = msgLen & 0xFF;
         std::string packet;
-        packet.push_back('1');
+        packet.push_back(static_cast<uint8_t>(opcode));
         packet.push_back(c1);
         packet.push_back(c2);
         packet += message;
