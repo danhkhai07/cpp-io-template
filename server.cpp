@@ -35,6 +35,7 @@ namespace metadata {
     std::unordered_map<int, std::string> fdNameMap;
 
     int removeFdName(int fd){
+        if (!hasName[fd]) return 0;
         auto it = fdNameMap.find(fd);      
         if (it != fdNameMap.end()){
             nameFdMap.erase(it->second);
@@ -404,7 +405,7 @@ private:
             {"/setname",    container::CommandCode::P_NAME_REGISTER},
             {"/msg",        container::CommandCode::P_SEND_MSG},
             {"/onlines",    container::CommandCode::G_CURRENT_ONLINE},
-            {"/help",    container::CommandCode::G_HELP},
+            {"/help",       container::CommandCode::G_HELP},
         };
 
     std::vector<std::string> parseToken(std::string_view raw){
@@ -458,7 +459,8 @@ public:
                 return 0;
             }
             Msg->receiver.insert(recv->second);
-            msg = msg.substr(Msg->tokens[0].size(), msg.size() - Msg->tokens[0].size() - 1);
+            int redundant = Msg->tokens[0].size() + Msg->tokens[1].size() + 2;
+            msg = msg.substr(redundant - 1, msg.size() - redundant);
             msg = "[PERSONAL] " + metadata::fdNameMap[Msg->sender] + ": " + msg;
         }
         
@@ -482,10 +484,6 @@ public:
 
         std::string msg;
         switch (cmdCode){
-            case container::CommandCode::NULL_CMD:
-                msg = "[SERVER] Unknown command.";
-                break;
-
             case container::CommandCode::P_NAME_REGISTER:
             {
                 if (Cmd->tokens.size() < 2 || Cmd->tokens.size() > 2){
@@ -539,6 +537,7 @@ public:
                         msg.push_back('\n');
                     }
                 }
+                msg.pop_back();
                 break;
             }
             
@@ -553,6 +552,10 @@ public:
                 // \t/msg [NAME] [MESSAGE]\t: Message privately with an active user.\n
                 break;
             }
+
+            case container::CommandCode::NULL_CMD:
+                msg = "[SERVER] Unknown command.";
+                break;
         }
 
         server.sendPacket(Cmd->sender, msg);
