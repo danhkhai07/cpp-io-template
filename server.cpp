@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <iterator>
 #include <netinet/in.h>
+#include <queue>
 #include <string>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -12,12 +13,10 @@
 #include <cstdint>
 #include <ctime>
 #include <functional>
+#include <vector>
 #include <cstring>
 #include <cstdio>
-#include <memory>
 #include <iostream>
-#include <queue>
-#include <deque>
 #include <unordered_map>
 #include <algorithm>
 
@@ -46,9 +45,14 @@ namespace metadata {
         return 0;
     }
 
-    int addFdName(int fd, const std::string& name){
+    int addFdName(int fd, const char* name, uint16_t size){
         if (hasName[fd]){ 
             std::cout << "metadata::addFdName: Client " << fd << " already has a name by " << fdNameMap[fd] <<".\n";
+            return -1;
+        }
+
+        if (size < 4 || size > 15){
+            std::cout << "metadata::addFdName: Client " << fd << "'s choice of name is out of \"character\".\n";
             return -1;
         }
 
@@ -84,16 +88,23 @@ namespace container {
     struct Request {
         int sender = -1;
         uint8_t opcode = 0;
-        std::string raw;
+        char raw[PACKET_SIZE];
+        uint16_t len = 0;
         std::vector<std::string> tokens;
         std::unordered_set<int> receiver;
         CommandCode code = CommandCode::NULL_CMD;
 
         Request() = default;
-        Request(int sndr, uint8_t op, std::string rw):
-             sender(sndr), opcode(op), raw(rw) {}
-        Request(int sndr, std::string rw, std::vector<std::string> tkns):
-             sender(sndr), raw(rw), tokens(tkns) {}
+        Request(int sndr, uint8_t op, char* rw, uint16_t ln):
+            sender(sndr), opcode(op), len(ln)
+        {
+            std::memcpy(raw, rw, ln);
+        }
+        Request(int sndr, char* rw, uint16_t ln, std::vector<std::string> tkns):
+            sender(sndr), len(ln), tokens(tkns)
+        {
+            std::memcpy(raw, rw, ln);
+        }
 
         ~Request() = default;
     };
@@ -101,7 +112,7 @@ namespace container {
     template<typename T>
     struct RingQueue {
     private:
-        static const size_t size = 1024;
+        static const uint16_t size = 1024;
         T queue[size + 1];
         int head = 0, tail = 0;
     public:
@@ -113,7 +124,7 @@ namespace container {
             return ((tail + 1) % (size + 1) == head);
         }
 
-        size_t getSize(){
+        uint16_t getSize(){
             return (tail - head + size + 1) % (size + 1);
         }
 
@@ -143,7 +154,7 @@ namespace container {
 
         bool pop_front(){
             if (this->empty()) return false;
-            head = (head + 1) % size;
+            head = (head + 1) % (size + 1);
             return true;
         }
 
@@ -163,7 +174,7 @@ private:
 
         uint8_t opParsed = 0;
         uint8_t opcode = 0;
-        std::string raw;
+        char raw[PACKET_SIZE];
 
         void reset(){
             *this = Buffer();
@@ -174,15 +185,17 @@ private:
     std::unordered_map<int, container::RingQueue<Buffer>> buffers;
 
 public:
-    int feed(int sender, std::string_view packet){
+    int feed(int sender, char* packet, uint16_t len){
         Buffer* buf;
         if (buffers[sender].empty()){
             buffers[sender].push_back(Buffer());
         }
         buf = &buffers[sender].back();
-
-        for (int i = 0; i < packet.size(); ++i){
-            char c = packet[i];
+            
+        char* it = packet;   
+        uint16_t tmp_len = 0;
+        for (int i = 0; i < len; ++i, ++it){
+            char c = *it;
             // parse opcode
             if (buf->opParsed < 1){
                 buf->opcode = static_cast<uint8_t>(c);
@@ -193,22 +206,30 @@ public:
             if (buf->lenParsed < 2){
                 buf->len = (buf->len << 8) | static_cast<uint8_t>(c);
                 buf->lenParsed++;
-                if (buf->lenParsed >= 2 && buf->len == 0){
-                    std::cout << "PacketParser::feed: Warning: Packet with length 0 found.\n";
-                    buf->reset();
+
+                if (buf->lenParsed >= 2){
+                    if (buf->len == 0){
+                        std::cout << "PacketParser::feed: Warning: Packet with length 0 found.\n";
+                        buf->reset();
+                    }
+                    if (buf->len > PACKET_SIZE){
+                        std::cout << "PacketParser::feed: Client " << sender << " sent an oversized packet (>1024 bytes). Returning an error.\n";
+                        return -1;
+                    }
                 }
                 continue;
             }
 
-            buf->raw += c;
-            buf->len--;
+            buf->raw[tmp_len] = c;
+            tmp_len++;
                 
-            if (buf->len == 0){
-                container::Request req = container::Request(sender, buf->opcode, buf->raw);
+            if (tmp_len >= buf->len){
+                tmp_len = 0;
+                container::Request req = container::Request(sender, buf->opcode, buf->raw, buf->len);
                 completedPackets.push_back(req);
                 buffers[sender].pop_front();
 
-                if (i + 1 < packet.size()){
+                if (i + 1 < len){
                     buffers[sender].push_back(Buffer());
                     buf = &buffers[sender].back();
                 }
@@ -240,16 +261,17 @@ private:
 
     // Server shit
     uint32_t clientCount = 0;
-    int serverFd;
-    int epfd;
-    uint16_t port;
+    int serverFd = -1;
+    int epfd = -1;
+    uint16_t port = 0;
     sockaddr_in serverAddr;
     epoll_event events[MAX_CLIENTS + 1];
 
     // TCP queue shit
     struct ToSendMessage {
         int offset = 0;
-        std::string msg;
+        uint16_t len = 0;
+        char msg[PACKET_SIZE];
     };
     container::RingQueue<container::Request> getQueue;
     std::unordered_map<int, container::RingQueue<ToSendMessage>> sendQueue;
@@ -274,6 +296,14 @@ private:
     }
 
 public:
+    Server():
+        clientCount(0),
+        serverFd(-1),
+        epfd(-1),
+        port(0)
+    {
+        // nothing else to do
+    }
     ~Server(){
         if (serverFd >= 0) close(serverFd);
         if (epfd >= 0) close(epfd);
@@ -282,6 +312,10 @@ public:
     int initialize(uint16_t p){
         port = p;
         serverFd = socket(AF_INET, SOCK_STREAM, 0);
+        if (serverFd < 0){
+            perror("serverFd");
+            return -1;
+        }
         if (serverFd < 0) return -1;  
 
         serverAddr.sin_addr.s_addr = INADDR_ANY;
@@ -293,6 +327,10 @@ public:
         setNonBlocking(serverFd);
 
         epfd = epoll_create1(0);
+        if (epfd < 0){
+            perror("epoll_create1");
+            return -1;
+        }
         epoll_event tmp_ev;    
         tmp_ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
         tmp_ev.data.fd = serverFd;
@@ -312,7 +350,8 @@ public:
             getQueue.push_back(tmp);
         }
 
-        for (int i = 0; i < nfds; ++i){ int fd = events[i].data.fd;
+        for (int i = 0; i < nfds; ++i){ 
+            int fd = events[i].data.fd;
 
             if (fd == serverFd){
                 sockaddr_in clientAddr;
@@ -334,9 +373,8 @@ public:
                 continue;
             }
             if (events[i].events & EPOLLIN){
-                std::string buffer;
-                buffer.resize(BUF_SIZE);
-                int bytes = read(fd, buffer.data(), buffer.size());
+                char buffer[BUF_SIZE];
+                int bytes = read(fd, buffer, sizeof(buffer));
                 if (bytes <= 0) {
                     if (bytes == 0) {
                         // connection closed
@@ -349,10 +387,9 @@ public:
                     }
                     continue;
                 }
-                buffer.resize(bytes);
 
                 int feedReturn;
-                if (bytes > 0) feedReturn = parser.feed(fd, buffer);
+                if (bytes > 0) feedReturn = parser.feed(fd, buffer, bytes);
                 if (feedReturn < 0){
                     std::cout << "Server::process: An error occur when feeding packets of client " << fd << ".\n";
                     std::cout << "Server::process: Dropping client " << fd << ".\n";
@@ -371,8 +408,8 @@ public:
                 }
 
                 ToSendMessage* buffer = &sendQueue[fd].front();
-                int messageSize = std::min((int)buffer->msg.size() - buffer->offset, BUF_SIZE);
-                int sent = send(fd, buffer->msg.data() + buffer->offset, messageSize, 0);
+                int messageSize = std::min((int) buffer->len - buffer->offset, BUF_SIZE);
+                int sent = send(fd, buffer->msg + buffer->offset, messageSize, 0);
                 if (sent == -1) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
                         continue;
@@ -381,7 +418,7 @@ public:
                     std::cout << "Client at fd number " << fd << " disconnected.\n";
                 } else {
                     buffer->offset += sent;
-                    if (buffer->offset >= buffer->msg.size()) sendQueue[fd].pop_front();
+                    if (buffer->offset >= buffer->len) sendQueue[fd].pop_front();
                 }
             }
             if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)){
@@ -407,9 +444,11 @@ public:
     }
 
     /// ONLY add the request to queue; the queue is processed in process(). 
-    int sendPacket(int fd, std::string_view msg){
+    int sendPacket(int fd, char* msg, uint16_t len){
         ToSendMessage sending;
-        sending.msg = msg;
+        std::memcpy(sending.msg, msg, len);
+        sending.len = len;
+        //std::cout << "Sending " << sending.msg << "...\n";
         sendQueue[fd].push_back(sending);
         epoll_event tmp_ev;
         tmp_ev.data.fd = fd;
@@ -435,70 +474,104 @@ private:
             {"/help",       container::CommandCode::G_HELP},
         };
 
+    void appendChar(const char* s, char* out, uint16_t& len){
+        size_t n = strlen(s);
+        std::memcpy(out + len, s, n);
+        len += n;
+    }
+
     std::vector<std::string> parseToken(std::string_view raw){
         std::vector<std::string> res;
-        std::string w;
+        char w[PACKET_SIZE];
+        uint16_t w_len = 0;
         for (char c : raw){
             if (c == ' '){
-                if (!w.empty()){ res.push_back(w); w.clear(); }
+                if (w_len > 0){
+                    res.push_back(w);
+                    w[0] = '\0';
+                    w_len = 0;
+                }
             } else {
-                w.push_back(c);
+                w[w_len] = c;
+                w_len++;
             }
         }
-        if (!w.empty()) res.push_back(w);
+        if (w_len > 0){
+            res.push_back(w);
+        }
         return res;
     }
 
 public:
     ///@return 0: no error | -1: raw.empty()
     int handleMessage(Server& server, container::Request& Req) {
-        std::string msg = Req.raw;
+        char msg[PACKET_SIZE + 64]; //padding for extra characters 
+        uint16_t len = 0;
 
         //refuse to let unnamed users send messages
         if (!metadata::hasName[Req.sender]){
-            msg = "[SERVER] Cannot send messages while unnamed. To name yourself, use command \"/setname\" as follows:\nUsage: /setname [NAME]";
-            server.sendPacket(Req.sender, msg);
+            appendChar(
+                "[SERVER] Cannot send messages while unnamed. To name yourself, use command \"/setname\" as follows:\nUsage: /setname [NAME]",
+                msg, len);
+                
+            server.sendPacket(Req.sender, msg, len);
             return 0;
         }
 
-        if (Req.raw == "") return -1;
+        if (Req.len == 0) return -1;
         if (Req.tokens.size() == 0) Req.tokens = parseToken(Req.raw);
         
 
         if (Req.tokens[0][0] != '/'){
             //global message
             Req.receiver = metadata::onlineFds;
-            msg = "[GLOBAL] " + metadata::fdNameMap[Req.sender] + ": " + msg;
+            appendChar("[GLOBAL] ", msg, len);
+            appendChar(metadata::fdNameMap[Req.sender].c_str(), msg, len);
+            appendChar(": ", msg, len);
+            appendChar(Req.raw, msg, len);
         } else {
             //personal message
             Req.receiver.insert(Req.sender);
             auto recv = metadata::nameFdMap.find(Req.tokens[1]);
             if (recv == metadata::nameFdMap.end()){
-                msg = "[SERVER] Cannot find user with that name.";
-                server.sendPacket(Req.sender, msg);
+                appendChar("[SERVER] Cannot find user with that name.", msg, len);
+                server.sendPacket(Req.sender, msg, len);
                 return 0;
             }
 
             if (recv->second == Req.sender){
-                msg = "[SERVER] Cannot send message to yourself.";
-                server.sendPacket(Req.sender, msg);
+                appendChar( "[SERVER] Cannot send message to yourself.", msg, len);
+                server.sendPacket(Req.sender, msg, len);
                 return 0;
             }
             Req.receiver.insert(recv->second);
             int redundant = Req.tokens[0].size() + Req.tokens[1].size() + 2;
-            msg = msg.substr(redundant - 1, msg.size() - redundant);
-            msg = "[PERSONAL] " + metadata::fdNameMap[Req.sender] + ": " + msg;
+            char tmp_msg[1024];
+            std::memcpy(tmp_msg, msg + redundant, len);
+
+            char custom[PACKET_SIZE];
+            uint16_t custom_len = 0;
+            appendChar("[PERSONAL] ", custom, custom_len);
+            appendChar(metadata::fdNameMap[Req.sender].c_str(), custom, custom_len);
+            appendChar(": ", custom, custom_len);
+            appendChar(tmp_msg, custom, custom_len);
+
+            std::memcpy(msg, custom, custom_len);
+            len = strlen(msg);
         }
         
         for (int i:Req.receiver){
-            server.sendPacket(i, msg);
+            server.sendPacket(i, msg, len);
         }
         return 0;
     }
 
     int handleCommand(Server& server, container::Request& Req) {
-        if (Req.raw == "") return -1;
+        if (Req.len == 0) return -1;
         if (Req.tokens.size() == 0) Req.tokens = parseToken(Req.raw);
+
+        char msg[PACKET_SIZE + 64]; //padding for extra characters 
+        uint16_t len = 0;
 
         container::CommandCode cmdCode = container::CommandCode::NULL_CMD;
         {
@@ -506,17 +579,16 @@ public:
             if (it != tokenCmdCodeMap.end()) cmdCode = it->second;
         }
 
-        std::string msg;
         switch (cmdCode){
             case container::CommandCode::P_NAME_REGISTER:
             {
                 if (Req.tokens.size() < 2 || Req.tokens.size() > 2){
-                    msg = "[SERVER] Incorrect argument format.\nUsage: /setname [NAME]";
+                    appendChar("[SERVER] Incorrect argument format.\nUsage: /setname [NAME]", msg, len);
                     break;
                 }
 
                 if (metadata::hasName[Req.sender]){
-                    msg = "[SERVER] Your name has already been set!";
+                    appendChar("[SERVER] Your name has already been set!", msg, len);
                     break;
                 }    
 
@@ -525,22 +597,22 @@ public:
                     auto it = metadata::nameFdMap.find(newUsername);
                     if (it != metadata::nameFdMap.end() ){ 
                         if (it->second != Req.sender)
-                            msg = "[SERVER] Username is already taken.";
+                            appendChar("[SERVER] Username is already taken.", msg, len);
                         else 
-                            msg = "[SERVER] Are you trippin'?";
+                            appendChar("[SERVER] Are you trippin'?", msg, len);
                         break;
                     }
                 }
 
-                metadata::addFdName(Req.sender, newUsername);
-                msg = "[SERVER] Username successfully set!";
+                metadata::addFdName(Req.sender, newUsername.c_str(), newUsername.size());
+                appendChar("[SERVER] Username successfully set!", msg, len);
                 break;
             }
 
             case container::CommandCode::P_SEND_MSG:
             {
                 if (Req.tokens.size() < 3){
-                    msg = "[SERVER] Incorrect argument format.\nUsage: /msg [USERNAME] [MESSAGE]";
+                    appendChar("[SERVER] Incorrect argument format.\nUsage: /msg [USERNAME] [MESSAGE]", msg, len);
                     break;
                 }
                 return handleMessage(server, Req);
@@ -549,25 +621,25 @@ public:
             case container::CommandCode::G_CURRENT_ONLINE:
             {    
                 if (Req.tokens.size() > 1){
-                    msg = "[SERVER] Incorrect argument format.\nUsage: /onlines";
+                    appendChar("[SERVER] Incorrect argument format.\nUsage: /onlines", msg, len);
                     break;
                 }
 
-                msg = "[SERVER] Active list:\n";
+                appendChar("[SERVER] Active list:\n", msg, len);
                 for (int i:metadata::onlineFds){
                     if (metadata::hasName[i]){
-                        msg.push_back('\t');
-                        msg += metadata::fdNameMap[i];
-                        msg.push_back('\n');
+                        appendChar("\t", msg, len);
+                        appendChar(metadata::fdNameMap[i].c_str(), msg, len);
+                        appendChar("\n", msg, len);
                     }
                 }
-                msg.pop_back();
+                msg[len] = '\0'; // pop the last \n char
                 break;
             }
             
             case container::CommandCode::G_HELP:
             {
-                msg = "To chat globally, simply type directly after '>' symbol.\nAvailable commands include:\n    /help\t\t\t: Display this text.\n    /setname [NAME]\t\t: Set your own name before texting.\n    /onlines\t\t\t: Display currently online users.\n    /msg [NAME] [MESSAGE]\t: Message privately with an active user.";
+                appendChar("To chat globally, simply type directly after '>' symbol.\nAvailable commands include:\n    /help\t\t\t: Display this text.\n    /setname [NAME]\t\t: Set your own name before texting.\n    /onlines\t\t\t: Display currently online users.\n    /msg [NAME] [MESSAGE]\t: Message privately with an active user.", msg, len);
                 // To chat globally, simply type directly after '>' symbol.\n
                 // Available commands include:\n
                 //     /help\t\t\t: Display this text.\n
@@ -578,11 +650,11 @@ public:
             }
 
             case container::CommandCode::NULL_CMD:
-                msg = "[SERVER] Unknown command.";
+                appendChar("[SERVER] Unknown command.", msg, len);
                 break;
         }
 
-        server.sendPacket(Req.sender, msg);
+        server.sendPacket(Req.sender, msg, len);
         return 0;
     }
 };
