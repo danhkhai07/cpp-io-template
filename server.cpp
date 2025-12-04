@@ -33,7 +33,7 @@ namespace metadata {
     std::unordered_map<int, std::string> fdNameMap;
 
     int removeFdName(int fd){
-        if (!hasName.at(fd)) return 0;
+        if (!hasName[fd]) return 0;
         auto it = fdNameMap.find(fd);      
         if (it != fdNameMap.end()){
             nameFdMap.erase(it->second);
@@ -47,8 +47,8 @@ namespace metadata {
     }
 
     int addFdName(int fd, const char* name, uint16_t size){
-        if (hasName.at(fd)){ 
-            std::cout << "metadata::addFdName: Client " << fd << " already has a name by " << fdNameMap.at(fd) <<".\n";
+        if (hasName[fd]){ 
+            std::cout << "metadata::addFdName: Client " << fd << " already has a name by " << fdNameMap[fd] <<".\n";
             return -1;
         }
 
@@ -63,9 +63,9 @@ namespace metadata {
             return -1;
         }
 
-        fdNameMap.at(fd) = name;
-        nameFdMap.at(name) = fd;
-        hasName.at(fd) = true;
+        fdNameMap[fd] = name;
+        nameFdMap[name] = fd;
+        hasName[fd] = true;
         return 0;
     }
 }
@@ -400,13 +400,13 @@ public:
                     continue;
                 }
                 
-                std::cout << "Client count: " << metadata::onlineFds.size() << "\n";
                 setNonBlocking(clientFd);
                 tmp_ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
                 tmp_ev.data.fd = clientFd;
                 epoll_ctl(epfd, EPOLL_CTL_ADD, clientFd, &tmp_ev);
                 std::cout << "Server::process: IP " << clientIPv4 << " connected through fd number " << clientFd << ".\n";
                 addClient(clientFd);
+                std::cout << "Client count: " << metadata::onlineFds.size() << "\n";
                 continue;
             }
 
@@ -536,7 +536,7 @@ public:
         uint16_t len = 0;
 
         //refuse to let unnamed users send messages
-        if (!metadata::hasName.at(Req.sender)){
+        if (!metadata::hasName[Req.sender]){
             appendChar(
                 "[SERVER] Cannot send messages while unnamed. To name yourself, use command \"/setname\" as follows:\nUsage: /setname [NAME]",
                 msg, len);
@@ -553,7 +553,7 @@ public:
             //global message
             Req.receiver = metadata::onlineFds;
             appendChar("[GLOBAL] ", msg, len);
-            appendChar(metadata::fdNameMap.at(Req.sender).c_str(), msg, len);
+            appendChar(metadata::fdNameMap[Req.sender].c_str(), msg, len);
             appendChar(": ", msg, len);
             appendChar(Req.raw, msg, len);
         } else {
@@ -579,7 +579,7 @@ public:
             char custom[PACKET_SIZE];
             uint16_t custom_len = 0;
             appendChar("[PERSONAL] ", custom, custom_len);
-            appendChar(metadata::fdNameMap.at(Req.sender).c_str(), custom, custom_len);
+            appendChar(metadata::fdNameMap[Req.sender].c_str(), custom, custom_len);
             appendChar(": ", custom, custom_len);
             appendChar(tmp_msg, custom, custom_len);
 
@@ -614,7 +614,7 @@ public:
                     break;
                 }
 
-                if (metadata::hasName.at(Req.sender)){
+                if (metadata::hasName[Req.sender]){
                     appendChar("[SERVER] Your name has already been set!", msg, len);
                     break;
                 }    
@@ -654,9 +654,9 @@ public:
 
                 appendChar("[SERVER] Active list:\n", msg, len);
                 for (int i:metadata::onlineFds){
-                    if (metadata::hasName.at(i)){
+                    if (metadata::hasName[i]){
                         appendChar("\t", msg, len);
-                        appendChar(metadata::fdNameMap.at(i).c_str(), msg, len);
+                        appendChar(metadata::fdNameMap[i].c_str(), msg, len);
                         appendChar("\n", msg, len);
                     }
                 }
