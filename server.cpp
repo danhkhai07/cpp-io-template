@@ -361,14 +361,14 @@ public:
 
                 if (clientCount >= MAX_CLIENTS){
                     close(clientFd);
-                    std::cout << "IP " << clientIPv4 << " tried to connect but failed due to: (probably maxed capacity)\n";
+                    std::cout << "Server::process: IP " << clientIPv4 << " tried to connect but failed due to: (probably maxed capacity)\n";
                     continue;
                 }
                 
                 tmp_ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
                 tmp_ev.data.fd = clientFd;
                 epoll_ctl(epfd, EPOLL_CTL_ADD, clientFd, &tmp_ev);
-                std::cout << "IP " << clientIPv4 << " connected through fd number " << clientFd << ".\n";
+                std::cout << "Server::process: IP " << clientIPv4 << " connected through fd number " << clientFd << ".\n";
                 addClient(clientFd);
                 continue;
             }
@@ -379,10 +379,10 @@ public:
                     if (bytes == 0) {
                         // connection closed
                         closeClient(fd);
-                        std::cout << "Client at fd number " << fd << " disconnected.\n";
+                        std::cout << "Server::process: Client at fd number " << fd << " disconnected.\n";
                     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
                         // real error
-                        std::cout << "Read error on fd " << fd << ". Closing client.\n";
+                        std::cout << "Server::process: Read error on fd " << fd << ". Closing client.\n";
                         closeClient(fd);
                     }
                     continue;
@@ -415,7 +415,7 @@ public:
                         continue;
                     }
                     closeClient(fd);
-                    std::cout << "Client at fd number " << fd << " disconnected.\n";
+                    std::cout << "Server::process: Client at fd number " << fd << " disconnected.\n";
                 } else {
                     buffer->offset += sent;
                     if (buffer->offset >= buffer->len) sendQueue[fd].pop_front();
@@ -423,7 +423,7 @@ public:
             }
             if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)){
                 closeClient(fd);
-                std::cout << "Client at fd number " << fd << " disconnected.\n";
+                std::cout << "Server::process: Client at fd number " << fd << " disconnected.\n";
             }
         }
 
