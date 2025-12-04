@@ -46,25 +46,25 @@ namespace metadata {
         return 0;
     }
 
-    int addFdName(int fd, const char* name, uint16_t size){
+    int addFdName(int fd, std::string_view name){
         if (hasName[fd]){ 
             std::cout << "metadata::addFdName: Client " << fd << " already has a name by " << fdNameMap[fd] <<".\n";
             return -1;
         }
 
-        if (size < 4 || size > 15){
+        if (name.size() < 4 || name.size() > 15){
             std::cout << "metadata::addFdName: Client " << fd << "'s choice of name is out of \"character\".\n";
             return -1;
         }
 
-        auto it = nameFdMap.find(name);
+        auto it = nameFdMap.find(name.data());
         if (it != nameFdMap.end()){
             std::cout << "metadata::addFdName: " << name << " already exists.\n";
             return -1;
         }
 
         fdNameMap[fd] = name;
-        nameFdMap[name] = fd;
+        nameFdMap[name.data()] = fd;
         hasName[fd] = true;
         return 0;
     }
@@ -273,7 +273,6 @@ private:
     // TCP queue shit
     struct ToSendMessage {
         int offset = 0;
-        uint16_t len = 0;
         std::string msg;
     };
 
@@ -429,7 +428,7 @@ public:
                 }
 
                 ToSendMessage* buffer = &sendQueue[fd].front();
-                int messageSize = std::min((int) buffer->len - buffer->offset, BUF_SIZE);
+                int messageSize = std::min((int) buffer->msg.size() - buffer->offset, BUF_SIZE);
                 int sent = send(fd, buffer->msg.c_str() + buffer->offset, messageSize, 0);
                 if (sent == -1) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -439,7 +438,7 @@ public:
                     std::cout << "Server::process: Client at fd number " << fd << " disconnected.\n";
                 } else {
                     buffer->offset += sent;
-                    if (buffer->offset >= buffer->len) sendQueue[fd].pop_front();
+                    if (buffer->offset >= buffer->msg.size()) sendQueue[fd].pop_front();
                 }
             }
 
@@ -472,10 +471,9 @@ public:
     }
 
     /// ONLY add the request to queue; the queue is processed in process(). 
-    int sendPacket(int fd, char* msg, uint16_t len){
+    int sendPacket(int fd, std::string_view msg){
         ToSendMessage sending;
-        sending.msg.assign(msg, len);
-        sending.len = len;
+        sending.msg = msg;
         //std::cout << "Sending " << sending.msg << "...\n";
         if (sendQueue[fd].full()) std::cout << "Server::sendPacket: send queue is full. Dropping packet.";
         else sendQueue[fd].push_back(sending);
@@ -503,12 +501,6 @@ private:
             {"/help",       container::CommandCode::G_HELP},
         };
 
-    void appendChar(const char* s, char* out, uint16_t& len){
-        size_t n = strlen(s);
-        std::memcpy(out + len, s, n);
-        len += n;
-    }
-
     std::vector<std::string> parseToken(std::string_view raw){
         std::vector<std::string> res;
         char w[PACKET_SIZE];
@@ -534,131 +526,55 @@ private:
     }
 
 public: 
-        ///@return 0: no error | -1: raw.empty()
+    /// @return 0: no error | -1: raw.empty()
     int handleMessage(Server& server, container::Request& Req) {
-        char msg[PACKET_SIZE + 64]; // padding for extra characters 
-        uint16_t len = 0;
-        const uint16_t MSG_CAP = PACKET_SIZE + 64;
-        const uint16_t BODY_CAP = PACKET_SIZE; // for tmp message assembly
+        std::string msg; 
 
         // refuse to let unnamed users send messages
-        if (!metadata::hasName[Req.sender]){
-            appendChar(
-                "[SERVER] Cannot send messages while unnamed. To name yourself, use command \"/setname\" as follows:\nUsage: /setname [NAME]",
-                msg, len);
-                
-            server.sendPacket(Req.sender, msg, len);
+        if (!metadata::hasName[Req.sender]) {
+            msg = "[SERVER] Cannot send messages while unnamed. To name yourself, use command \"/setname\" as follows:\nUsage: /setname [NAME]"; 
+            server.sendPacket(Req.sender, msg);
             return 0;
         }
 
-        if (Req.len == 0) return -1;
-        if (Req.tokens.size() == 0) Req.tokens = parseToken(Req.raw);
+        if (Req.len == 0)
+            return -1;
 
-        // defensive
-        if (Req.tokens.empty()) return -1;
+        if (Req.tokens.size() == 0)
+            Req.tokens = parseToken(Req.raw);
 
-        if (Req.tokens[0][0] != '/'){
+        std::string username = metadata::fdNameMap[Req.sender];
+        if (Req.tokens[0][0] != '/') {
             // global message
             Req.receiver = metadata::onlineFds;
-            appendChar("[GLOBAL] ", msg, len);
-            {
-                auto it = metadata::fdNameMap.find(Req.sender);
-                if (it != metadata::fdNameMap.end()) appendChar(it->second.c_str(), msg, len);
-                else appendChar("unknown", msg, len);
-            }
-            appendChar(": ", msg, len);
-
-            // append raw payload safely (use Req.len, not strlen on raw)
-            size_t copyLen = Req.len;
-            if (copyLen > PACKET_SIZE) copyLen = PACKET_SIZE;
-            if (len + copyLen > MSG_CAP) copyLen = MSG_CAP - len;
-            if (copyLen > 0) {
-                std::memcpy(msg + len, Req.raw.data(), copyLen);
-                len += (uint16_t)copyLen;
-            }
-
+            msg = "[GLOBAL] " + username + ": " + Req.raw;
         } else {
             // personal message
             Req.receiver.insert(Req.sender);
-            if (Req.tokens.size() < 2){
-                appendChar("[SERVER] Incorrect personal message format.", msg, len);
-                server.sendPacket(Req.sender, msg, len);
-                return 0;
-            }
 
             auto recv = metadata::nameFdMap.find(Req.tokens[1]);
-            if (recv == metadata::nameFdMap.end()){
-                appendChar("[SERVER] Cannot find user with that name.", msg, len);
-                server.sendPacket(Req.sender, msg, len);
+            if (recv == metadata::nameFdMap.end()) {
+                msg = "[SERVER] Cannot find user with that name.";
+                server.sendPacket(Req.sender, msg);
                 return 0;
             }
 
-            if (recv->second == Req.sender){
-                appendChar( "[SERVER] Cannot send message to yourself.", msg, len);
-                server.sendPacket(Req.sender, msg, len);
+            if (recv->second == Req.sender) {
+                msg = "[SERVER] Cannot send message to yourself.";
+                server.sendPacket(Req.sender, msg);
                 return 0;
             }
 
             Req.receiver.insert(recv->second);
 
-            // Build tmp_msg by joining tokens[2..] with spaces (safe, bounded)
-            char tmp_msg[BODY_CAP];
-            uint16_t tmp_len = 0;
-            if (Req.tokens.size() >= 3) {
-                for (size_t t = 2; t < Req.tokens.size(); ++t) {
-                    const std::string &part = Req.tokens[t];
-                    size_t need = part.size();
-                    // ensure space for part and a space
-                    if (need > (size_t)(BODY_CAP - tmp_len)) {
-                        need = BODY_CAP - tmp_len;
-                    }
-                    if (need > 0) {
-                        std::memcpy(tmp_msg + tmp_len, part.data(), need);
-                        tmp_len += (uint16_t)need;
-                    }
-                    // add a space if more tokens remain and room
-                    if (t + 1 < Req.tokens.size() && tmp_len < BODY_CAP) {
-                        tmp_msg[tmp_len++] = ' ';
-                    }
-                    if (tmp_len >= BODY_CAP) break;
-                }
-            } else {
-                // fallback: take up to BODY_CAP bytes from raw payload
-                size_t copyLen = Req.len;
-                if (copyLen > BODY_CAP) copyLen = BODY_CAP;
-                if (copyLen > 0) {
-                    std::memcpy(tmp_msg, Req.raw.data(), copyLen);
-                    tmp_len = (uint16_t)copyLen;
-                }
-            }
-            // ensure NUL-termination before passing to appendChar
-            if (tmp_len >= BODY_CAP) tmp_msg[BODY_CAP - 1] = '\0';
-            else tmp_msg[tmp_len] = '\0';
-
-            // Build custom personal message in bounded buffer
-            char custom[PACKET_SIZE];
-            uint16_t custom_len = 0;
-            appendChar("[PERSONAL] ", custom, custom_len);
-            {
-                auto it = metadata::fdNameMap.find(Req.sender);
-                if (it != metadata::fdNameMap.end()) appendChar(it->second.c_str(), custom, custom_len);
-                else appendChar("unknown", custom, custom_len);
-            }
-            appendChar(": ", custom, custom_len);
-            // tmp_msg is NUL-terminated -> safe to pass to appendChar
-            appendChar(tmp_msg, custom, custom_len);
-
-            // copy custom -> msg (bounded) and set len explicitly (do NOT call strlen on msg)
-            uint16_t to_copy = custom_len;
-            if (to_copy > MSG_CAP) to_copy = MSG_CAP;
-            std::memcpy(msg, custom, to_copy);
-            len = to_copy;
+            int redundant = Req.tokens[0].size() + Req.tokens[1].size() + 2;
+            msg = "[PERSONAL] " + username + " -> " + recv->first + ": " + msg.substr(redundant, msg.size() - redundant);
         }
 
-        // dispatch to receivers
-        for (int i: Req.receiver){
-            server.sendPacket(i, msg, len);
+        for (int i : Req.receiver) {
+            server.sendPacket(i, msg);
         }
+
         return 0;
     }
 
@@ -666,8 +582,7 @@ public:
         if (Req.len == 0) return -1;
         if (Req.tokens.size() == 0) Req.tokens = parseToken(Req.raw);
 
-        char msg[PACKET_SIZE + 64]; //padding for extra characters 
-        uint16_t len = 0;
+        std::string msg;
 
         container::CommandCode cmdCode = container::CommandCode::NULL_CMD;
         {
@@ -679,12 +594,12 @@ public:
             case container::CommandCode::P_NAME_REGISTER:
             {
                 if (Req.tokens.size() < 2 || Req.tokens.size() > 2){
-                    appendChar("[SERVER] Incorrect argument format.\nUsage: /setname [NAME]", msg, len);
+                    msg = "[SERVER] Incorrect argument format.\nUsage: /setname [NAME]";
                     break;
                 }
 
                 if (metadata::hasName[Req.sender]){
-                    appendChar("[SERVER] Your name has already been set!", msg, len);
+                    msg = "[SERVER] Your name has already been set!";
                     break;
                 }    
 
@@ -693,27 +608,27 @@ public:
                     auto it = metadata::nameFdMap.find(username);
                     if (it != metadata::nameFdMap.end() ){ 
                         if (it->second != Req.sender)
-                            appendChar("[SERVER] Username is already taken.", msg, len);
+                            msg = "[SERVER] Username is already taken.";
                         else 
-                            appendChar("[SERVER] Are you trippin'?", msg, len);
+                            msg = "[SERVER] This ___king __gg_...";
                         break;
                     }
                 }
 
-                if (Req.tokens[1].size() < 4 || Req.tokens[1].size() > 15){
-                    appendChar("[SERVER] Username is of invalid length.", msg, len);
+                if (Req.tokens[1].size() < 6 || Req.tokens[1].size() > 15){
+                    msg = "[SERVER] Username is of invalid length. You must choose a name with a length between 6 and 15 characters.";
                     break;
                 }
 
-                metadata::addFdName(Req.sender, username.c_str(), username.size());
-                appendChar("[SERVER] Username successfully set!", msg, len);
+                metadata::addFdName(Req.sender, username);
+                msg = "[SERVER] Username successfully set!";
                 break;
             }
 
             case container::CommandCode::P_SEND_MSG:
             {
                 if (Req.tokens.size() < 3){
-                    appendChar("[SERVER] Incorrect argument format.\nUsage: /msg [USERNAME] [MESSAGE]", msg, len);
+                    msg = "[SERVER] Incorrect argument format.\nUsage: /msg [USERNAME] [MESSAGE]";
                     break;
                 }
                 return handleMessage(server, Req);
@@ -722,41 +637,38 @@ public:
             case container::CommandCode::G_CURRENT_ONLINE:
             {    
                 if (Req.tokens.size() > 1){
-                    appendChar("[SERVER] Incorrect argument format.\nUsage: /onlines", msg, len);
+                    msg = "[SERVER] Incorrect argument format.\nUsage: /onlines";
                     break;
                 }
 
-                appendChar("[SERVER] Active list:\n", msg, len);
+                msg = "[SERVER] Active list:\n";
                 for (int i:metadata::onlineFds){
                     if (metadata::hasName[i]){
-                        appendChar("\t", msg, len);
-                        appendChar(metadata::fdNameMap[i].c_str(), msg, len);
-                        appendChar("\n", msg, len);
+                        msg = "\t" + metadata::fdNameMap[i] + '\n'; 
                     }
                 }
-                msg[len - 1] = '\0'; // pop the last \n char
-                len--;
+                msg.pop_back();
                 break;
             }
             
             case container::CommandCode::G_HELP:
             {
-                appendChar("To chat globally, simply type directly after '>' symbol.\nAvailable commands include:\n    /help\t\t\t: Display this text.\n    /setname [NAME]\t\t: Set your own name before texting.\n    /onlines\t\t\t: Display currently online users.\n    /msg [NAME] [MESSAGE]\t: Message privately with an active user.", msg, len);
-                // To chat globally, simply type directly after '>' symbol.\n
+                msg = "To chat globally, simply type directly after '>' symbol.\nAvailable commands include:\n    /help\t\t\t: Display this text.\n    /setname [NAME]\t\t: Set your own name before texting.\n    /onlines\t\t\t: Display currently online users.\n    /msg [NAME] [MESSAGE]\t: Message privately with an active user.";
+                // "To chat globally, simply type directly after '>' symbol.\n 
                 // Available commands include:\n
-                //     /help\t\t\t: Display this text.\n
-                //     /setname [NAME]\t\t: Set your own name before texting.\n
-                //     /onlines\t\t\t: Display currently online users.\n
-                //     /msg [NAME] [MESSAGE]\t: Message privately with an active user.\n
+                //      /help\t\t\t: Display this text.\n
+                //      /setname [NAME]\t\t: Set your own name before texting.\n
+                //      /onlines\t\t\t: Display currently online users.\n
+                //      /msg [NAME] [MESSAGE]\t: Message privately with an active user.\n";
                 break;
             }
 
             case container::CommandCode::NULL_CMD:
-                appendChar("[SERVER] Unknown command.", msg, len);
+                msg = "[SERVER] Unknown command.";
                 break;
         }
 
-        server.sendPacket(Req.sender, msg, len);
+        server.sendPacket(Req.sender, msg);
         return 0;
     }
 };
