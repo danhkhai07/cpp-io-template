@@ -183,13 +183,9 @@ private:
     };
 
     container::RingQueue<container::Request, 4096> completedPackets;
-    std::vector<container::RingQueue<Buffer, 1024>> buffers;
+    std::unordered_map<int, container::RingQueue<Buffer, 1024>> buffers;
 
 public:
-    PacketParser() {
-        buffers.resize(MAX_CLIENTS + 1);
-    }
-
     int feed(int sender, char* packet, uint16_t len){
         Buffer* buf;
         if (buffers[sender].empty()){
